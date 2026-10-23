@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  secrets-guard:
+    name: No secrets committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if a real secrets file is tracked
+        run: |
+          if git ls-files | grep -E '(^|/)secrets\.h$'; then
+            echo "::error::secrets.h is committed. Remove it from git and rotate the leaked keys."
+            exit 1
+          fi
+
+  pc-tests:
+    name: Box logic core tests (PC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run make test
+        run: |
+          if [ -f Makefile ] && grep -qE '^test:' Makefile; then
+            make test
+          else
+            echo "::notice::No 'make test' target yet, so skipping."
+          fi
+
+  esp32-build:
+    name: ESP32 firmware builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for ESP32 project
+        id: check
+        run: echo "exists=$([ -f esp32/platformio.ini ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.exists == 'true'
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@v4
+        if: steps.check.outputs.exists == 'true'
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('esp32/platformio.ini') }}
+      - name: Build with placeholder secrets
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          pip install platformio
+          cp esp32/include/secrets.example.h esp32/include/secrets.h
+          pio run -d esp32
+      - name: Skip notice
+        if: steps.check.outputs.exists != 'true'
+        run: echo "::notice::No esp32/platformio.ini yet, so skipping."

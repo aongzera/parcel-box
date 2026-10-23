@@ -1,0 +1,17 @@
+# Secrets (see ADR 0002); commit secrets.example.h instead
+secrets.h
+
+# PlatformIO
+.pio/
+
+# STM32CubeIDE build output
+stm32/**/Debug/
+stm32/**/Release/
+
+# PC test build output
+build/
+
+# Editors / OS
+.vscode/
+.DS_Store
+Thumbs.db
