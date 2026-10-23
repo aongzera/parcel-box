@@ -1,6 +1,6 @@
 # Smart Parcel Box
 
-Embedded System Lab final project: an STM32 + ESP32-S3 parcel box that detects Deliveries and Collections and alerts the Owner. Read `GLOSSARY.md` and `docs/adr/` before working.
+Embedded System Lab final project: an STM32 + ESP32-S3 parcel box that detects Deliveries and Collections and alerts the Owner. Read `product.md` (the project overview), `GLOSSARY.md` and `docs/adr/` before working.
 
 ## CI
 
