@@ -151,7 +151,7 @@ The ESP32 ACKs a duplicate sequence number but ignores it, so each Event is deli
 | `stm32/` | The STM32CubeIDE project (NUCLEO-F411RE, HAL), including the Box logic core |
 | `esp32/` | The PlatformIO project (Arduino framework) for the ESP32-S3 bridge |
 | `cloud/` | The Dashboard page, Firebase rules and hosting config |
-| `docs/` | ADRs, agent setup and the manual test checklists |
+| `docs/` | ADRs, the pin map ([docs/pinmap.md](docs/pinmap.md)), agent setup and the manual test checklists |
 | `GLOSSARY.md` | The domain vocabulary. Read it before naming anything. |
 | `AGENTS.md` | Instructions for AI agents, and the CI rules |
 | `product.md` | This file |
@@ -198,7 +198,7 @@ The folders fill in as the tickets land.
 | [13](https://github.com/aongzera/parcel-box/issues/13) | Write the manual test checklists | agent | 8, 10 |
 | [14](https://github.com/aongzera/parcel-box/issues/14) | Final end-to-end test run and backup demo video | human | 9–13 |
 
-**Still open:** the pin map for the NUCLEO-F411RE must be written and posted on issue #2 before wiring starts.
+**Pin map:** [docs/pinmap.md](docs/pinmap.md) is the wiring contract for issue #2. The STM32 also mirrors every UART line to its USB virtual COM port (USART2) for debugging.
 
 ## 9. Demo plan (4 minutes)
 
