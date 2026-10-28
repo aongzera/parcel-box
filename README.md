@@ -9,6 +9,7 @@ The Smart Parcel Box: an Embedded System Lab final project (STM32 + ESP32-S3) th
 | [product.md](product.md) | The project overview, architecture and UART protocol |
 | [GLOSSARY.md](GLOSSARY.md) | The exact meaning of words like Lid cycle, Delivery and Collection |
 | [docs/pinmap.md](docs/pinmap.md) | What wire goes where |
+| [docs/guides/](docs/guides/) | Beginner guides: [Firebase](docs/guides/firebase.md), [Dashboard](docs/guides/dashboard.md), [Telegram](docs/guides/telegram.md) |
 | [docs/adr/](docs/adr/) | Why we made the big decisions |
 | [AGENTS.md](AGENTS.md) | Instructions for AI coding agents |
 | [Issues](https://github.com/aongzera/parcel-box/issues) | The task list; the spec is issue #1 |
