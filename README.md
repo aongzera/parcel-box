@@ -148,6 +148,8 @@ The Box logic is tested on your laptop, with no board needed:
 make test
 ```
 
+This builds the Box logic core (`stm32/BoxCore/`) and its tests (`stm32/BoxCore/Tests/`) with `gcc` into `build/`, then runs them. Each test prints `ok` or `FAIL`, and the command fails if any test fails.
+
 To get `gcc` and `make` on Windows, either:
 - **WSL** (recommended): run `wsl --install` in PowerShell, restart, then `sudo apt install build-essential` inside Ubuntu; or
 - **MSYS2:** install it, then `pacman -S mingw-w64-ucrt-x86_64-gcc make`.
