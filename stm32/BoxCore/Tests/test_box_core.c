@@ -115,10 +115,75 @@ static void test_parcel_presence_is_sampled_after_the_settle_not_at_the_close(vo
     CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
 }
 
+static void test_occupied_box_lid_cycle_with_parcel_taken_out_is_one_collection(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, true));
+    hold(&rig, readings(false, true), 500);
+
+    hold(&rig, readings(true, true), 1000);     /* Owner opens the Lid */
+    hold(&rig, readings(false, false), 5000);   /* closes it, Box now empty */
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_COLLECTED);
+}
+
+static void test_occupied_box_lid_cycle_still_occupied_is_one_opened_occupied(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, true));
+
+    hold(&rig, readings(true, true), 1000);
+    hold(&rig, readings(false, true), 5000);    /* still a parcel inside */
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_OCCUPIED);
+}
+
+static void test_empty_box_lid_cycle_still_empty_is_one_opened_empty(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+
+    hold(&rig, readings(true, false), 1000);    /* someone looks inside */
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
+}
+
+/* One Lid cycle: open for a second, then closed long enough to settle,
+ * with `parcel_present_after` showing whether a parcel is inside. */
+static void lid_cycle(Rig *rig, bool parcel_present_after)
+{
+    hold(rig, readings(true, parcel_present_after), 1000);
+    hold(rig, readings(false, parcel_present_after), 3000);
+}
+
+static void test_several_lid_cycles_in_a_row_track_the_box_state(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+
+    lid_cycle(&rig, true);     /* Courier drops a parcel in */
+    lid_cycle(&rig, true);     /* opened again, parcel still there */
+    lid_cycle(&rig, false);    /* Owner takes it out */
+    lid_cycle(&rig, false);    /* opened again, still empty */
+
+    CHECK_EQ_INT(4, rig.recorder.event_count);
+    if (rig.recorder.event_count == 4) {
+        CHECK_EQ_INT(BOX_EVENT_DELIVERED, rig.recorder.events[0]);
+        CHECK_EQ_INT(BOX_EVENT_OPENED_OCCUPIED, rig.recorder.events[1]);
+        CHECK_EQ_INT(BOX_EVENT_COLLECTED, rig.recorder.events[2]);
+        CHECK_EQ_INT(BOX_EVENT_OPENED_EMPTY, rig.recorder.events[3]);
+    }
+}
+
 int main(void)
 {
     RUN_TEST(test_empty_box_lid_cycle_with_parcel_left_inside_is_one_delivery);
     RUN_TEST(test_delivery_waits_the_settle_time_after_the_lid_closes);
     RUN_TEST(test_parcel_presence_is_sampled_after_the_settle_not_at_the_close);
+    RUN_TEST(test_occupied_box_lid_cycle_with_parcel_taken_out_is_one_collection);
+    RUN_TEST(test_occupied_box_lid_cycle_still_occupied_is_one_opened_occupied);
+    RUN_TEST(test_empty_box_lid_cycle_still_empty_is_one_opened_empty);
+    RUN_TEST(test_several_lid_cycles_in_a_row_track_the_box_state);
     return TEST_SUMMARY();
 }

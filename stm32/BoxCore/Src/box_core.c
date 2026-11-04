@@ -18,14 +18,22 @@ static void emit_event(BoxCore *core, BoxEvent event, uint32_t now_ms)
     }
 }
 
-/* The settle is over: compare the state before the Lid cycle with now. */
+/* The outcome of a Lid cycle, from the state before it and after the settle
+ * (product.md section 4). */
+static BoxEvent lid_cycle_outcome(bool was_occupied, bool is_occupied)
+{
+    if (was_occupied) {
+        return is_occupied ? BOX_EVENT_OPENED_OCCUPIED : BOX_EVENT_COLLECTED;
+    }
+    return is_occupied ? BOX_EVENT_DELIVERED : BOX_EVENT_OPENED_EMPTY;
+}
+
+/* The settle is over: emit exactly one outcome for this Lid cycle. */
 static void finish_lid_cycle(BoxCore *core, uint32_t now_ms, bool parcel_present)
 {
     bool was_occupied = core->occupied;
     core->occupied = parcel_present;
-    if (!was_occupied && core->occupied) {
-        emit_event(core, BOX_EVENT_DELIVERED, now_ms);
-    }
+    emit_event(core, lid_cycle_outcome(was_occupied, core->occupied), now_ms);
 }
 
 void box_core_tick(BoxCore *core, uint32_t now_ms, BoxReadings readings)
