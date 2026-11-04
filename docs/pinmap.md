@@ -53,7 +53,7 @@ Check these with the real modules before trusting them, as some KY clones are in
   - PC13: the blue user button.
   - PA13 / PA14: SWD, which you need for flashing.
   - PA2 / PA3: the ST-LINK USB serial port.
-- **USART1 (D8/D2) talks to the ESP32. USART2 (over USB) is a debug mirror.** The STM32 also prints every line it sends and receives to USART2, so you can watch the protocol on your laptop without an extra USB-serial adapter. This also covers testing the STM32 alone (ticket #7).
+- **USART1 (D8/D2) talks to the ESP32. USART2 (over USB) is a debug mirror.** The STM32 also prints every line it sends (and, once the Event sender lands in #27, every line it receives) to USART2, so you can watch the protocol on your laptop without an extra USB-serial adapter. This also covers testing the STM32 alone (ticket #7).
 - **GPIO17/18** are the ESP32-S3's usual UART1 pins and are broken out on DevKit-style boards. If your board's labels differ, pick two free GPIOs and update this file.
 
 ## Known risks
