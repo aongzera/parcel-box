@@ -208,6 +208,170 @@ static void test_reopening_the_lid_during_the_settle_restarts_it_and_is_one_lid_
     CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
 }
 
+static void test_a_one_tick_lid_glitch_while_closed_is_not_a_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(false, false), 1000);
+
+    hold(&rig, readings(true, false), TICK_MS); /* reed switch blips open */
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
+/* The longest Lid change the debounce must still ignore. hold() ticks at the
+ * end of each step, so a change held for N ms is only N - TICK_MS old on its
+ * last tick: a hold of exactly BOX_LID_DEBOUNCE_MS is still too short to
+ * count, and one tick more is the shortest that does. */
+#define LONGEST_IGNORED_GLITCH_MS BOX_LID_DEBOUNCE_MS
+#define SHORTEST_COUNTED_LID_CHANGE_MS (BOX_LID_DEBOUNCE_MS + TICK_MS)
+
+/* Compile-time check: the glitch-during-the-settle test fits its glitch
+ * into the second half of the settle. */
+typedef char debounce_must_fit_inside_the_settle[
+    (BOX_LID_DEBOUNCE_MS < BOX_SETTLE_TIME_MS - 1000u) ? 1 : -1];
+
+static void test_a_lid_glitch_just_shorter_than_the_debounce_is_not_a_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(false, false), 1000);
+
+    hold(&rig, readings(true, false), LONGEST_IGNORED_GLITCH_MS);
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
+/* The reed switch chattering as the Lid moves: four one-tick flips, ending
+ * on the reading opposite to `settles_lid_open`, which the caller then
+ * holds. Each flip is far shorter than BOX_LID_DEBOUNCE_MS. */
+static void reed_bounce(Rig *rig, bool settles_lid_open, bool parcel_present)
+{
+    int flip;
+    for (flip = 0; flip < 4; flip++) {
+        bool lid_open = (flip % 2 == 0) ? settles_lid_open : !settles_lid_open;
+        hold(rig, readings(lid_open, parcel_present), TICK_MS);
+    }
+}
+
+static void test_reed_switch_bounce_on_open_and_close_is_one_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+
+    reed_bounce(&rig, true, false);
+    hold(&rig, readings(true, false), 1000);
+
+    reed_bounce(&rig, false, true);
+    /* The settle runs from the last bounce, when the Lid really closed:
+     * holding for the settle time ends one tick short of it. */
+    hold(&rig, readings(false, true), BOX_SETTLE_TIME_MS);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+
+    hold(&rig, readings(false, true), TICK_MS);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+}
+
+static void test_a_lid_glitch_during_the_settle_does_not_restart_it(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(true, false), 1000);
+
+    /* The Lid closes, then the reed switch blips open, just too briefly to
+     * count, halfway through the settle. The settle still ends on time. */
+    hold(&rig, readings(false, true), 1000);
+    hold(&rig, readings(true, true), LONGEST_IGNORED_GLITCH_MS);
+    hold(&rig, readings(false, true),
+         BOX_SETTLE_TIME_MS - 1000 - LONGEST_IGNORED_GLITCH_MS);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+
+    hold(&rig, readings(false, true), TICK_MS);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+}
+
+static void test_a_lid_open_just_longer_than_the_debounce_is_a_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(false, false), 1000);
+
+    hold(&rig, readings(true, false), SHORTEST_COUNTED_LID_CHANGE_MS);
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
+}
+
+/* The Lid reopens two ticks before the settle would end. The reopen hasn't
+ * passed the debounce yet when the settle time runs out, but the settle must
+ * not finish with a hand in the beam: it is the same Lid cycle, judged once
+ * the Lid finally stays closed (product.md section 4). */
+static void test_reopening_the_lid_just_before_the_settle_ends_is_still_one_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(true, false), 1000);
+
+    hold(&rig, readings(false, false), BOX_SETTLE_TIME_MS - 2 * TICK_MS);
+    hold(&rig, readings(true, true), 1000);     /* reopened, hand inside */
+    hold(&rig, readings(false, false), 5000);   /* nothing left behind */
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
+}
+
+/* A glitch too short to count, right at the end of the settle, only delays
+ * the end of the settle until the reading is closed again. */
+static void test_a_lid_glitch_at_the_end_of_the_settle_delays_it_and_is_one_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(true, false), 1000);
+
+    hold(&rig, readings(false, false), BOX_SETTLE_TIME_MS - 2 * TICK_MS);
+    hold(&rig, readings(true, true), LONGEST_IGNORED_GLITCH_MS);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+
+    hold(&rig, readings(false, false), 5000);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
+}
+
+/* The Lid reopens one tick before the settle ends, and the reed switch
+ * bounces as it does: open, closed, open, closed, then open for good. A
+ * one-tick closed reading in that bounce is not the Lid being closed, so the
+ * settle must not finish on it with a hand in the beam. */
+static void test_a_bouncing_reopen_as_the_settle_ends_is_still_one_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(true, false), 1000);
+
+    hold(&rig, readings(false, false), BOX_SETTLE_TIME_MS - TICK_MS);
+    reed_bounce(&rig, true, true);              /* reopening, hand inside */
+    hold(&rig, readings(true, true), 1000);
+    hold(&rig, readings(false, false), 5000);   /* nothing left behind */
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
+}
+
+/* The longest closed blip the debounce ignores, in the middle of a reopen
+ * as the settle ends, still isn't a close: the settle doesn't finish on it. */
+static void test_a_closed_blip_within_a_reopen_as_the_settle_ends_is_not_a_close(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(true, false), 1000);
+
+    hold(&rig, readings(false, false), BOX_SETTLE_TIME_MS - TICK_MS);
+    hold(&rig, readings(true, true), TICK_MS);                    /* reopening */
+    hold(&rig, readings(false, true), LONGEST_IGNORED_GLITCH_MS); /* blip */
+    hold(&rig, readings(true, true), 1000);                       /* hand inside */
+    hold(&rig, readings(false, false), 5000);                     /* left empty */
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
+}
+
 int main(void)
 {
     RUN_TEST(test_empty_box_lid_cycle_with_parcel_left_inside_is_one_delivery);
@@ -219,5 +383,14 @@ int main(void)
     RUN_TEST(test_several_lid_cycles_in_a_row_track_the_box_state);
     RUN_TEST(test_a_hand_in_the_box_while_the_lid_is_open_is_not_a_parcel);
     RUN_TEST(test_reopening_the_lid_during_the_settle_restarts_it_and_is_one_lid_cycle);
+    RUN_TEST(test_a_one_tick_lid_glitch_while_closed_is_not_a_lid_cycle);
+    RUN_TEST(test_a_lid_glitch_just_shorter_than_the_debounce_is_not_a_lid_cycle);
+    RUN_TEST(test_reed_switch_bounce_on_open_and_close_is_one_lid_cycle);
+    RUN_TEST(test_a_lid_glitch_during_the_settle_does_not_restart_it);
+    RUN_TEST(test_a_lid_open_just_longer_than_the_debounce_is_a_lid_cycle);
+    RUN_TEST(test_reopening_the_lid_just_before_the_settle_ends_is_still_one_lid_cycle);
+    RUN_TEST(test_a_lid_glitch_at_the_end_of_the_settle_delays_it_and_is_one_lid_cycle);
+    RUN_TEST(test_a_bouncing_reopen_as_the_settle_ends_is_still_one_lid_cycle);
+    RUN_TEST(test_a_closed_blip_within_a_reopen_as_the_settle_ends_is_not_a_close);
     return TEST_SUMMARY();
 }

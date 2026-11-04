@@ -22,6 +22,11 @@
  * hand still inside or a parcel still settling doesn't count. */
 #define BOX_SETTLE_TIME_MS 2000u
 
+/* How long the raw Lid reading must stay the same before the core accepts
+ * it as a Lid open or close, so reed switch bounce or a wobble is ignored.
+ * The settle is still timed from when the Lid actually closed. */
+#define BOX_LID_DEBOUNCE_MS 50u
+
 /* The outcome of one Lid cycle. Names match the UART protocol. */
 typedef enum {
     BOX_EVENT_DELIVERED,
@@ -37,7 +42,8 @@ typedef struct {
 } BoxStatus;
 
 /* Raw sensor readings for one tick. The hardware adapter converts pin levels
- * to these meanings; the core does the debouncing and the settle wait. */
+ * to these meanings and does no filtering. The core debounces `lid_open`,
+ * and reads `parcel_present` only once the settle after a close ends. */
 typedef struct {
     bool lid_open;
     bool parcel_present;
@@ -55,7 +61,9 @@ typedef struct {
 typedef struct {
     BoxCoreOutputs outputs;
     bool occupied;
-    bool lid_open;
+    bool lid_open;              /* debounced */
+    bool raw_lid_open;          /* last raw reading */
+    uint32_t raw_lid_changed_at_ms;
     bool settling;
     uint32_t lid_closed_at_ms;
 } BoxCore;
