@@ -8,9 +8,22 @@
  * How to use it:
  *   1. Fill a BoxCoreOutputs with your callbacks (any may be NULL).
  *   2. Call box_core_init() once at power-up with the first sensor readings.
+ *      Only their Lid reading is used; parcel_present is ignored until the
+ *      power-up settle ends (see "Power-up" below).
  *   3. Call box_core_tick() periodically (e.g. every 10 ms) with the current
  *      time and the raw, undebounced sensor readings.
- * The core calls your callbacks from inside box_core_tick().
+ * The core calls your callbacks from inside box_core_tick() only, never from
+ * box_core_init().
+ *
+ * Power-up: the core reads its starting Empty/Occupied state once the Lid
+ * has been closed for one settle (BOX_SETTLE_TIME_MS after boot, or after
+ * the Lid closes if it was open at boot), and reports it as the first Box
+ * status, with no Event. A Lid cycle that starts before then is part of
+ * power-up and emits no Event either.
+ *
+ * Send no STS line, not even a heartbeat, until the first
+ * on_box_status_changed. With the Lid open at boot, that is only after it
+ * closes and settles. Send the boot STS line from that first callback.
  */
 #ifndef BOX_CORE_H
 #define BOX_CORE_H
@@ -49,7 +62,14 @@ typedef struct {
     bool parcel_present;
 } BoxReadings;
 
-/* Where the core sends what it decides. Each callback gets `context` back. */
+/* Where the core sends what it decides. Each callback gets `context` back.
+ *   on_event: once per finished Lid cycle (never for the power-up one).
+ *   on_box_status_changed: the full Box status, first when the starting
+ *     state is known, then on every debounced Lid open or close and every
+ *     Empty/Occupied change, and never when nothing changed. Keep the last
+ *     one for the STS heartbeat, but send no STS (not even a heartbeat)
+ *     until this has been called once: before then there is no Box status
+ *     to send, and a zero-filled one would be a false EMPTY,LID_CLOSED. */
 typedef struct {
     void *context;
     void (*on_event)(void *context, BoxEvent event, uint32_t now_ms);
@@ -60,6 +80,7 @@ typedef struct {
  * no heap; treat the fields as private. */
 typedef struct {
     BoxCoreOutputs outputs;
+    bool starting_state_known;  /* false until the power-up settle ends */
     bool occupied;
     bool lid_open;              /* debounced */
     bool raw_lid_open;          /* last raw reading */
@@ -68,7 +89,7 @@ typedef struct {
     uint32_t lid_closed_at_ms;
 } BoxCore;
 
-/* Power-up: take the first readings as the starting Box state. */
+/* Power-up. Emits nothing: see "Power-up" at the top of this file. */
 void box_core_init(BoxCore *core, BoxCoreOutputs outputs,
                    uint32_t now_ms, BoxReadings readings);
 

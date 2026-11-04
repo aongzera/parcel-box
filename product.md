@@ -67,7 +67,7 @@ Opened while occupied exists because the IR sensor can only say "something is in
 Other rules:
 - The reed switch is debounced (~50 ms), so a wobble counts as one Lid cycle.
 - If the Lid reopens during the settle, the Lid cycle continues: the settle restarts on the next close, and the outcome compares against the state before the first open.
-- At power-up, the Box reads its starting state and emits **no** Event, so there are no false Alerts.
+- At power-up, the Box reads its starting state and emits **no** Event, so there are no false Alerts. It reads that state once the Lid has been closed for one settle time (so ~2 s after boot, or after the Lid closes if it was open at boot), then sends its first Box status. A Lid cycle that starts before then is part of power-up and emits no Event.
 
 ### Buzzer
 
@@ -118,10 +118,12 @@ The Box keeps detecting Lid cycles and beeping locally. Events are queued and de
 | Direction | Message | Meaning |
 |---|---|---|
 | STM32 → ESP32 | `EVT,<seq>,<OUTCOME>` | An Event. The outcome is one of the four names in section 4. |
-| STM32 → ESP32 | `STS,<EMPTY\|OCCUPIED>,<LID_OPEN\|LID_CLOSED>` | **Box status**. Sent on every change and every few seconds as a heartbeat. |
+| STM32 → ESP32 | `STS,<EMPTY\|OCCUPIED>,<LID_OPEN\|LID_CLOSED>` | **Box status**. Sent on every change and every few seconds as a heartbeat, but not until the Box knows its starting state after boot (see below). |
 | ESP32 → STM32 | `ACK,<seq>` | The Event was accepted. The STM32 resends until it gets this. |
 
 The ESP32 ACKs a duplicate sequence number but ignores it, so each Event is delivered exactly once. A lower sequence number, or a heartbeat after a long silence, means the STM32 rebooted: start a new session and don't treat it as a duplicate.
+
+After a reboot the STM32 sends **no** line at all, not even a heartbeat, until it knows its starting state (section 4): about 2 s after boot, or, if the Lid was open at boot, only once it has closed and settled. After a normal boot this silence is ~2 s, too short to show. If the Lid stays open after a reboot, the Dashboard shows the Box offline until the Lid closes and settles. STS has no "unknown" value; the first STS after boot is the real starting state.
 
 **Why plain text matters:** either board can be tested alone by typing or reading these lines in a serial monitor. You can drive the ESP32 and Dashboard without an STM32 by typing `EVT,1,DELIVERED`.
 

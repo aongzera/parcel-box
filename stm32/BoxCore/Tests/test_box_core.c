@@ -16,6 +16,8 @@ typedef struct {
     BoxEvent events[MAX_RECORDED];
     uint32_t event_times_ms[MAX_RECORDED];
     int event_count;
+    BoxStatus statuses[MAX_RECORDED];
+    int status_count;
 } Recorder;
 
 static void record_event(void *context, BoxEvent event, uint32_t now_ms)
@@ -26,6 +28,16 @@ static void record_event(void *context, BoxEvent event, uint32_t now_ms)
         r->event_times_ms[r->event_count] = now_ms;
     }
     r->event_count++;
+}
+
+static void record_box_status(void *context, BoxStatus status, uint32_t now_ms)
+{
+    Recorder *r = context;
+    (void)now_ms;
+    if (r->status_count < MAX_RECORDED) {
+        r->statuses[r->status_count] = status;
+    }
+    r->status_count++;
 }
 
 /* ---- Driving a sensor timeline ------------------------------------------ */
@@ -44,12 +56,14 @@ static BoxReadings readings(bool lid_open, bool parcel_present)
     return r;
 }
 
-static void power_up(Rig *rig, BoxReadings first)
+/* Switch the Box on with these first readings, and nothing more. */
+static void boot(Rig *rig, BoxReadings first)
 {
     BoxCoreOutputs outputs = {0};
     memset(rig, 0, sizeof *rig);
     outputs.context = &rig->recorder;
     outputs.on_event = record_event;
+    outputs.on_box_status_changed = record_box_status;
     box_core_init(&rig->core, outputs, rig->now_ms, first);
 }
 
@@ -61,6 +75,15 @@ static void hold(Rig *rig, BoxReadings r, uint32_t duration_ms)
         rig->now_ms += TICK_MS;
         box_core_tick(&rig->core, rig->now_ms, r);
     }
+}
+
+/* Boot, then wait until the Box has read its starting state (one settle
+ * with the Lid closed), so the test starts from a known Empty or Occupied
+ * Box. `first` must have the Lid closed. */
+static void power_up(Rig *rig, BoxReadings first)
+{
+    boot(rig, first);
+    hold(rig, first, BOX_SETTLE_TIME_MS);
 }
 
 /* Exactly one Event was emitted, and it was `expected`. events[0] is only
@@ -232,6 +255,11 @@ static void test_a_one_tick_lid_glitch_while_closed_is_not_a_lid_cycle(void)
 typedef char debounce_must_fit_inside_the_settle[
     (BOX_LID_DEBOUNCE_MS < BOX_SETTLE_TIME_MS - 1000u) ? 1 : -1];
 
+/* Compile-time check: the debounce boundary tests assume the debounce is a
+ * whole number of ticks. */
+typedef char debounce_must_be_whole_ticks[
+    (BOX_LID_DEBOUNCE_MS % TICK_MS == 0) ? 1 : -1];
+
 static void test_a_lid_glitch_just_shorter_than_the_debounce_is_not_a_lid_cycle(void)
 {
     Rig rig;
@@ -372,6 +400,164 @@ static void test_a_closed_blip_within_a_reopen_as_the_settle_ends_is_not_a_close
     CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
 }
 
+/* ---- Power-up ----------------------------------------------------------- */
+
+static void test_powering_up_empty_emits_no_event(void)
+{
+    Rig rig;
+    boot(&rig, readings(false, false));
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
+static void test_powering_up_occupied_emits_no_event(void)
+{
+    Rig rig;
+    boot(&rig, readings(false, true));
+    hold(&rig, readings(false, true), 5000);
+
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
+/* Exactly one Box status was reported, and it was this one. */
+#define CHECK_ONLY_STATUS(rig, is_occupied, is_lid_open)                  \
+    do {                                                                  \
+        CHECK_EQ_INT(1, (rig).recorder.status_count);                     \
+        if ((rig).recorder.status_count >= 1) {                           \
+            CHECK_STATUS(rig, 0, is_occupied, is_lid_open);               \
+        }                                                                 \
+    } while (0)
+
+/* The Box status reported in position `i` was this one. */
+#define CHECK_STATUS(rig, i, is_occupied, is_lid_open)                    \
+    do {                                                                  \
+        CHECK_EQ_INT((is_occupied), (rig).recorder.statuses[i].occupied); \
+        CHECK_EQ_INT((is_lid_open), (rig).recorder.statuses[i].lid_open); \
+    } while (0)
+
+/* The starting state is read once the Lid has been closed for a full settle
+ * after boot, and reported as the first Box status. */
+static void test_powering_up_reports_the_starting_box_status_after_one_settle(void)
+{
+    Rig rig;
+    boot(&rig, readings(false, true));
+
+    hold(&rig, readings(false, true), BOX_SETTLE_TIME_MS - TICK_MS);
+    CHECK_EQ_INT(0, rig.recorder.status_count);
+
+    hold(&rig, readings(false, true), TICK_MS);
+    CHECK_ONLY_STATUS(rig, true, false);
+
+    hold(&rig, readings(false, true), 5000);
+    CHECK_ONLY_STATUS(rig, true, false);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
+/* (a) The first raw sample at boot is a bounce: the Lid reads open for a
+ * moment, then chatters and settles closed. No Lid cycle, no Event, and the
+ * open reading is never reported. */
+static void test_a_bouncing_first_lid_reading_at_boot_is_not_a_lid_cycle(void)
+{
+    Rig rig;
+    boot(&rig, readings(true, false));
+    reed_bounce(&rig, false, false);
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+    CHECK_ONLY_STATUS(rig, false, false);
+}
+
+/* (b) Powered up with the Lid open and a hand in the beam. The starting
+ * state isn't read with the Lid open: no Box status at all is reported while
+ * it stays open, nor during the settle after it closes. Then the starting
+ * state comes from the settled sample, with no Event. */
+static void test_powering_up_with_the_lid_open_reports_nothing_until_it_closes_and_settles(void)
+{
+    Rig rig;
+    boot(&rig, readings(true, true));
+    hold(&rig, readings(true, true), 10000);
+    CHECK_EQ_INT(0, rig.recorder.status_count);
+
+    /* The first closed tick is TICK_MS from now, so holding for exactly the
+     * settle time ends one tick short of it. */
+    hold(&rig, readings(false, false), BOX_SETTLE_TIME_MS);
+    CHECK_EQ_INT(0, rig.recorder.status_count);
+
+    hold(&rig, readings(false, false), TICK_MS);
+    CHECK_ONLY_STATUS(rig, false, false);
+
+    hold(&rig, readings(false, false), 5000);
+    CHECK_ONLY_STATUS(rig, false, false);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
+/* A Lid cycle that starts before the power-up settle ends is part of power-up:
+ * its "before" state is unknown, so it emits no Event, and the starting
+ * state is read when it settles. */
+static void test_a_lid_cycle_during_the_power_up_settle_emits_no_event(void)
+{
+    Rig rig;
+    boot(&rig, readings(false, false));
+    hold(&rig, readings(false, false), 500);
+
+    lid_cycle(&rig, true);
+
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+    CHECK_ONLY_STATUS(rig, true, false);
+}
+
+/* ---- Box status changes ------------------------------------------------- */
+
+static void test_a_lid_cycle_that_changes_nothing_reports_lid_open_then_lid_closed(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));     /* status 0: Empty, closed */
+
+    lid_cycle(&rig, false);
+
+    CHECK_EQ_INT(3, rig.recorder.status_count);
+    if (rig.recorder.status_count == 3) {
+        CHECK_STATUS(rig, 0, false, false);
+        CHECK_STATUS(rig, 1, false, true);
+        CHECK_STATUS(rig, 2, false, false);
+    }
+}
+
+static void test_a_delivery_also_reports_the_change_to_occupied(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));     /* status 0: Empty, closed */
+
+    lid_cycle(&rig, true);
+
+    CHECK_EQ_INT(4, rig.recorder.status_count);
+    if (rig.recorder.status_count == 4) {
+        CHECK_STATUS(rig, 0, false, false);     /* starting state: Empty */
+        CHECK_STATUS(rig, 1, false, true);      /* Lid open */
+        CHECK_STATUS(rig, 2, false, false);     /* Lid closed, settling */
+        CHECK_STATUS(rig, 3, true, false);      /* settled: Occupied */
+    }
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+}
+
+static void test_no_box_status_is_reported_when_nothing_changes(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, true));      /* status 0: Occupied, closed */
+
+    /* Raw Lid glitches too short to count are not reported either: the Box
+     * status shows the debounced Lid. */
+    hold(&rig, readings(false, true), 3000);
+    hold(&rig, readings(true, true), LONGEST_IGNORED_GLITCH_MS);
+    hold(&rig, readings(false, true), 3000);
+    reed_bounce(&rig, false, true);
+    hold(&rig, readings(false, true), 3000);
+
+    CHECK_ONLY_STATUS(rig, true, false);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
 int main(void)
 {
     RUN_TEST(test_empty_box_lid_cycle_with_parcel_left_inside_is_one_delivery);
@@ -392,5 +578,14 @@ int main(void)
     RUN_TEST(test_a_lid_glitch_at_the_end_of_the_settle_delays_it_and_is_one_lid_cycle);
     RUN_TEST(test_a_bouncing_reopen_as_the_settle_ends_is_still_one_lid_cycle);
     RUN_TEST(test_a_closed_blip_within_a_reopen_as_the_settle_ends_is_not_a_close);
+    RUN_TEST(test_powering_up_empty_emits_no_event);
+    RUN_TEST(test_powering_up_occupied_emits_no_event);
+    RUN_TEST(test_powering_up_reports_the_starting_box_status_after_one_settle);
+    RUN_TEST(test_a_bouncing_first_lid_reading_at_boot_is_not_a_lid_cycle);
+    RUN_TEST(test_powering_up_with_the_lid_open_reports_nothing_until_it_closes_and_settles);
+    RUN_TEST(test_a_lid_cycle_during_the_power_up_settle_emits_no_event);
+    RUN_TEST(test_a_lid_cycle_that_changes_nothing_reports_lid_open_then_lid_closed);
+    RUN_TEST(test_a_delivery_also_reports_the_change_to_occupied);
+    RUN_TEST(test_no_box_status_is_reported_when_nothing_changes);
     return TEST_SUMMARY();
 }
