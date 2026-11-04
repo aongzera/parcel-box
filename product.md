@@ -66,6 +66,7 @@ Opened while occupied exists because the IR sensor can only say "something is in
 
 Other rules:
 - The reed switch is debounced (~50 ms), so a wobble counts as one Lid cycle.
+- If the Lid reopens during the settle, the Lid cycle continues: the settle restarts on the next close, and the outcome compares against the state before the first open.
 - At power-up, the Box reads its starting state and emits **no** Event, so there are no false Alerts.
 
 ### Buzzer

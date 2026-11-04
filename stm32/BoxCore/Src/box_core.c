@@ -36,6 +36,10 @@ static void finish_lid_cycle(BoxCore *core, uint32_t now_ms, bool parcel_present
     emit_event(core, lid_cycle_outcome(was_occupied, core->occupied), now_ms);
 }
 
+/* Parcel presence is read only when the settle ends, never while the Lid is
+ * open, so a hand inside doesn't count. If the Lid reopens during the
+ * settle, the Lid cycle isn't over: the settle restarts on the next close,
+ * and `occupied` still holds the state from before the first open. */
 void box_core_tick(BoxCore *core, uint32_t now_ms, BoxReadings readings)
 {
     if (core->lid_open && !readings.lid_open) {

@@ -73,6 +73,14 @@ static void hold(Rig *rig, BoxReadings r, uint32_t duration_ms)
         }                                                                 \
     } while (0)
 
+/* One Lid cycle: open for a second, then closed long enough to settle,
+ * with `parcel_present_after` showing whether a parcel is inside. */
+static void lid_cycle(Rig *rig, bool parcel_present_after)
+{
+    hold(rig, readings(true, parcel_present_after), 1000);
+    hold(rig, readings(false, parcel_present_after), 3000);
+}
+
 /* ---- Tests -------------------------------------------------------------- */
 
 static void test_empty_box_lid_cycle_with_parcel_left_inside_is_one_delivery(void)
@@ -81,8 +89,7 @@ static void test_empty_box_lid_cycle_with_parcel_left_inside_is_one_delivery(voi
     power_up(&rig, readings(false, false));
     hold(&rig, readings(false, false), 500);
 
-    hold(&rig, readings(true, false), 1000);    /* Courier opens the Lid */
-    hold(&rig, readings(false, true), 5000);    /* closes it, parcel inside */
+    lid_cycle(&rig, true);     /* Courier leaves a parcel inside */
 
     CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
 }
@@ -121,8 +128,7 @@ static void test_occupied_box_lid_cycle_with_parcel_taken_out_is_one_collection(
     power_up(&rig, readings(false, true));
     hold(&rig, readings(false, true), 500);
 
-    hold(&rig, readings(true, true), 1000);     /* Owner opens the Lid */
-    hold(&rig, readings(false, false), 5000);   /* closes it, Box now empty */
+    lid_cycle(&rig, false);    /* Owner takes the parcel out */
 
     CHECK_ONLY_EVENT(rig, BOX_EVENT_COLLECTED);
 }
@@ -132,8 +138,7 @@ static void test_occupied_box_lid_cycle_still_occupied_is_one_opened_occupied(vo
     Rig rig;
     power_up(&rig, readings(false, true));
 
-    hold(&rig, readings(true, true), 1000);
-    hold(&rig, readings(false, true), 5000);    /* still a parcel inside */
+    lid_cycle(&rig, true);     /* still a parcel inside */
 
     CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_OCCUPIED);
 }
@@ -143,18 +148,9 @@ static void test_empty_box_lid_cycle_still_empty_is_one_opened_empty(void)
     Rig rig;
     power_up(&rig, readings(false, false));
 
-    hold(&rig, readings(true, false), 1000);    /* someone looks inside */
-    hold(&rig, readings(false, false), 5000);
+    lid_cycle(&rig, false);    /* someone looks inside, nothing changes */
 
     CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
-}
-
-/* One Lid cycle: open for a second, then closed long enough to settle,
- * with `parcel_present_after` showing whether a parcel is inside. */
-static void lid_cycle(Rig *rig, bool parcel_present_after)
-{
-    hold(rig, readings(true, parcel_present_after), 1000);
-    hold(rig, readings(false, parcel_present_after), 3000);
 }
 
 static void test_several_lid_cycles_in_a_row_track_the_box_state(void)
@@ -176,6 +172,42 @@ static void test_several_lid_cycles_in_a_row_track_the_box_state(void)
     }
 }
 
+static void test_a_hand_in_the_box_while_the_lid_is_open_is_not_a_parcel(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+
+    /* A Courier's hand is in the IR beam the whole time the Lid is open,
+     * but nothing is left behind. */
+    hold(&rig, readings(true, true), 3000);
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_OPENED_EMPTY);
+}
+
+/* Decision: reopening the Lid during the settle means the Lid cycle isn't
+ * over yet. The settle is cancelled and restarts on the next close, and the
+ * cycle still compares against the state before the FIRST open. So one
+ * open-close-reopen-close sequence is one Lid cycle and one Event, judged
+ * only once the Lid has finally stayed closed (product.md section 4). */
+static void test_reopening_the_lid_during_the_settle_restarts_it_and_is_one_lid_cycle(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+
+    hold(&rig, readings(true, false), 1000);    /* Courier opens the Lid */
+    hold(&rig, readings(false, true), 1000);    /* closes it, half a settle */
+    hold(&rig, readings(true, true), 1000);     /* reopens to push it in */
+
+    /* Holding for the settle time ends one tick short of a full settle
+     * after the second close, so nothing is decided yet. */
+    hold(&rig, readings(false, true), BOX_SETTLE_TIME_MS);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+
+    hold(&rig, readings(false, true), TICK_MS);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+}
+
 int main(void)
 {
     RUN_TEST(test_empty_box_lid_cycle_with_parcel_left_inside_is_one_delivery);
@@ -185,5 +217,7 @@ int main(void)
     RUN_TEST(test_occupied_box_lid_cycle_still_occupied_is_one_opened_occupied);
     RUN_TEST(test_empty_box_lid_cycle_still_empty_is_one_opened_empty);
     RUN_TEST(test_several_lid_cycles_in_a_row_track_the_box_state);
+    RUN_TEST(test_a_hand_in_the_box_while_the_lid_is_open_is_not_a_parcel);
+    RUN_TEST(test_reopening_the_lid_during_the_settle_restarts_it_and_is_one_lid_cycle);
     return TEST_SUMMARY();
 }
