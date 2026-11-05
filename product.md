@@ -71,8 +71,10 @@ Other rules:
 
 ### Buzzer
 
-- A single short beep when a Delivery is registered. This is the Courier's confirmation.
-- A repeating beep if the Lid stays open longer than about 30 s, which stops as soon as it closes.
+- A single short beep (about 150 ms) when a Delivery is registered. This is the Courier's confirmation. No other outcome beeps.
+- A repeating beep (the nag: 200 ms on, 800 ms off) if the Lid stays open longer than 30 s, which stops as soon as it closes. Each opening gets the full 30 s again.
+- The nag also covers a Lid that is open when the Box is switched on: it counts from power-up, without waiting for the Box to know whether it is Empty or Occupied.
+- The two never cut each other short: the buzzer sounds while either one wants it.
 
 ### Without WiFi
 

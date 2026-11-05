@@ -54,7 +54,8 @@ typedef struct {
 
 void box_lines_init(BoxLines *lines, BoxLinesOutput output);
 
-/* The BoxCoreOutputs that route the core's callbacks to `lines`. */
+/* The BoxCoreOutputs that route the core's Events and Box status changes to
+ * `lines`. Every other callback is NULL. */
 BoxCoreOutputs box_lines_core_outputs(BoxLines *lines);
 
 /* Write one STS line now and restart the heartbeat wait. */

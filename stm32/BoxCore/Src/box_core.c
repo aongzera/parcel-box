@@ -18,6 +18,10 @@ void box_core_init(BoxCore *core, BoxCoreOutputs outputs,
     core->raw_lid_changed_at_ms = now_ms;
     core->settling = true;
     core->lid_closed_at_ms = now_ms;
+    core->lid_opened_at_ms = now_ms;
+    core->delivery_beeping = false;
+    core->delivery_beep_at_ms = now_ms;
+    core->buzzer_on = false;
 }
 
 static void emit_event(BoxCore *core, BoxEvent event, uint32_t now_ms)
@@ -52,6 +56,7 @@ static BoxEvent lid_cycle_outcome(bool was_occupied, bool is_occupied)
 static void finish_lid_cycle(BoxCore *core, uint32_t now_ms, bool parcel_present)
 {
     bool was_occupied = core->occupied;
+    BoxEvent event;
     if (!core->starting_state_known) {
         core->starting_state_known = true;
         core->occupied = parcel_present;
@@ -62,7 +67,48 @@ static void finish_lid_cycle(BoxCore *core, uint32_t now_ms, bool parcel_present
     if (core->occupied != was_occupied) {
         emit_box_status(core, now_ms);
     }
-    emit_event(core, lid_cycle_outcome(was_occupied, core->occupied), now_ms);
+    event = lid_cycle_outcome(was_occupied, core->occupied);
+    if (event == BOX_EVENT_DELIVERED) {
+        core->delivery_beeping = true;
+        core->delivery_beep_at_ms = now_ms;
+    }
+    emit_event(core, event, now_ms);
+}
+
+/* Does the nag want the buzzer on? Only while the debounced Lid has been
+ * open past BOX_LID_LEFT_OPEN_MS, and then only in the "on" part of each
+ * period, counted from when the nag started. It also needs the raw reading
+ * to be open, so the nag stops the moment the reed switch closes rather than
+ * a debounce later (which could start a new beep with the Lid already shut).
+ * A glitch too short to count only mutes it for that long. */
+static bool nag_wants_buzzer(const BoxCore *core, uint32_t now_ms)
+{
+    uint32_t open_for_ms = (uint32_t)(now_ms - core->lid_opened_at_ms);
+    if (!core->lid_open || !core->raw_lid_open ||
+        open_for_ms < BOX_LID_LEFT_OPEN_MS) {
+        return false;
+    }
+    return (open_for_ms - BOX_LID_LEFT_OPEN_MS) %
+               (BOX_NAG_BEEP_ON_MS + BOX_NAG_BEEP_OFF_MS) < BOX_NAG_BEEP_ON_MS;
+}
+
+/* The Delivery beep and the nag each decide on their own whether they want
+ * the buzzer; it is on while either does, so neither cuts the other short.
+ * Only changes are sent. */
+static void update_buzzer(BoxCore *core, uint32_t now_ms)
+{
+    bool on;
+    if (core->delivery_beeping &&
+        (uint32_t)(now_ms - core->delivery_beep_at_ms) >= BOX_DELIVERY_BEEP_MS) {
+        core->delivery_beeping = false;
+    }
+    on = core->delivery_beeping || nag_wants_buzzer(core, now_ms);
+    if (on != core->buzzer_on) {
+        core->buzzer_on = on;
+        if (core->outputs.on_buzzer) {
+            core->outputs.on_buzzer(core->outputs.context, on, now_ms);
+        }
+    }
 }
 
 /* Parcel presence is read only when the settle ends, never while the Lid is
@@ -86,6 +132,8 @@ void box_core_tick(BoxCore *core, uint32_t now_ms, BoxReadings readings)
             /* The Lid has closed. Time the settle from the real close. */
             core->settling = true;
             core->lid_closed_at_ms = core->raw_lid_changed_at_ms;
+        } else {
+            core->lid_opened_at_ms = core->raw_lid_changed_at_ms;
         }
         core->lid_open = core->raw_lid_open;
         if (core->starting_state_known) {
@@ -104,4 +152,6 @@ void box_core_tick(BoxCore *core, uint32_t now_ms, BoxReadings readings)
         core->settling = false;
         finish_lid_cycle(core, now_ms, readings.parcel_present);
     }
+
+    update_buzzer(core, now_ms);
 }

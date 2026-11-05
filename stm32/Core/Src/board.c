@@ -8,10 +8,13 @@
  * meanings"). If a KY clone turns out to be inverted, flip it here and
  * nowhere else:
  *   reed LOW = magnet near = Lid closed, so HIGH means the Lid is open;
- *   IR   LOW = something in front = Parcel presence.
+ *   IR   LOW = something in front = Parcel presence;
+ *   buzzer HIGH = beep (an active buzzer, so no PWM).
  */
 #define LID_OPEN_LEVEL       GPIO_PIN_SET
 #define PARCEL_PRESENT_LEVEL GPIO_PIN_RESET
+#define BUZZER_ON_LEVEL      GPIO_PIN_SET
+#define BUZZER_OFF_LEVEL     GPIO_PIN_RESET
 
 BoxReadings board_read_sensors(void)
 {
@@ -21,4 +24,10 @@ BoxReadings board_read_sensors(void)
     readings.parcel_present =
         HAL_GPIO_ReadPin(PARCEL_IR_GPIO_Port, PARCEL_IR_Pin) == PARCEL_PRESENT_LEVEL;
     return readings;
+}
+
+void board_set_buzzer(bool on)
+{
+    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin,
+                      on ? BUZZER_ON_LEVEL : BUZZER_OFF_LEVEL);
 }

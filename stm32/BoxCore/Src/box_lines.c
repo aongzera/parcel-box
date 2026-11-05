@@ -94,7 +94,7 @@ static void core_box_status_changed(void *context, BoxStatus status, uint32_t no
 
 BoxCoreOutputs box_lines_core_outputs(BoxLines *lines)
 {
-    BoxCoreOutputs outputs;
+    BoxCoreOutputs outputs = {0};   /* callbacks we don't handle stay NULL */
     outputs.context = lines;
     outputs.on_event = core_event;
     outputs.on_box_status_changed = core_box_status_changed;

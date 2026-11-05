@@ -9,6 +9,7 @@
 
 #define TICK_MS 10u
 #define MAX_RECORDED 32
+#define MAX_BUZZER_RECORDED 256
 
 /* ---- Recording what the core emits ------------------------------------- */
 
@@ -18,6 +19,9 @@ typedef struct {
     int event_count;
     BoxStatus statuses[MAX_RECORDED];
     int status_count;
+    bool buzzer_on[MAX_BUZZER_RECORDED];
+    uint32_t buzzer_times_ms[MAX_BUZZER_RECORDED];
+    int buzzer_count;
 } Recorder;
 
 static void record_event(void *context, BoxEvent event, uint32_t now_ms)
@@ -40,6 +44,16 @@ static void record_box_status(void *context, BoxStatus status, uint32_t now_ms)
     r->status_count++;
 }
 
+static void record_buzzer(void *context, bool on, uint32_t now_ms)
+{
+    Recorder *r = context;
+    if (r->buzzer_count < MAX_BUZZER_RECORDED) {
+        r->buzzer_on[r->buzzer_count] = on;
+        r->buzzer_times_ms[r->buzzer_count] = now_ms;
+    }
+    r->buzzer_count++;
+}
+
 /* ---- Driving a sensor timeline ------------------------------------------ */
 
 typedef struct {
@@ -56,22 +70,33 @@ static BoxReadings readings(bool lid_open, bool parcel_present)
     return r;
 }
 
-/* Switch the Box on with these first readings, and nothing more. */
-static void boot(Rig *rig, BoxReadings first)
+/* Switch the Box on at `start_ms` with these first readings, and nothing
+ * more. */
+static void boot_at(Rig *rig, BoxReadings first, uint32_t start_ms)
 {
     BoxCoreOutputs outputs = {0};
     memset(rig, 0, sizeof *rig);
+    rig->now_ms = start_ms;
     outputs.context = &rig->recorder;
     outputs.on_event = record_event;
     outputs.on_box_status_changed = record_box_status;
+    outputs.on_buzzer = record_buzzer;
     box_core_init(&rig->core, outputs, rig->now_ms, first);
 }
 
-/* Hold these readings for `duration_ms`, ticking every TICK_MS. */
+/* Switch the Box on at time 0. */
+static void boot(Rig *rig, BoxReadings first)
+{
+    boot_at(rig, first, 0);
+}
+
+/* Hold these readings for `duration_ms`, ticking every TICK_MS. Counts the
+ * time elapsed rather than comparing clock values, so it keeps going when
+ * now_ms wraps around. */
 static void hold(Rig *rig, BoxReadings r, uint32_t duration_ms)
 {
-    uint32_t end_ms = rig->now_ms + duration_ms;
-    while (rig->now_ms < end_ms) {
+    uint32_t elapsed_ms;
+    for (elapsed_ms = 0; elapsed_ms < duration_ms; elapsed_ms += TICK_MS) {
         rig->now_ms += TICK_MS;
         box_core_tick(&rig->core, rig->now_ms, r);
     }
@@ -558,6 +583,292 @@ static void test_no_box_status_is_reported_when_nothing_changes(void)
     CHECK_EQ_INT(0, rig.recorder.event_count);
 }
 
+/* ---- Buzzer ------------------------------------------------------------- */
+
+/* Buzzer command `i` was `is_on`, sent at `at_ms`. */
+#define CHECK_BUZZER(rig, i, is_on, at_ms)                                \
+    do {                                                                  \
+        CHECK_EQ_INT((is_on), (rig).recorder.buzzer_on[i]);               \
+        CHECK_EQ_INT((at_ms), (rig).recorder.buzzer_times_ms[i]);         \
+    } while (0)
+
+static void test_a_delivery_is_one_short_beep(void)
+{
+    Rig rig;
+    uint32_t delivered_at_ms;
+    power_up(&rig, readings(false, false));
+
+    lid_cycle(&rig, true);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+    delivered_at_ms = rig.recorder.event_times_ms[0];
+
+    hold(&rig, readings(false, true), 10000);
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 2) {
+        CHECK_BUZZER(rig, 0, true, delivered_at_ms);
+        CHECK_BUZZER(rig, 1, false, delivered_at_ms + BOX_DELIVERY_BEEP_MS);
+    }
+}
+
+static void test_collections_and_opened_lid_cycles_do_not_beep(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, true));
+
+    lid_cycle(&rig, true);      /* Opened while occupied */
+    lid_cycle(&rig, false);     /* Collection */
+    lid_cycle(&rig, false);     /* Opened while empty */
+    hold(&rig, readings(false, false), 5000);
+
+    CHECK_EQ_INT(3, rig.recorder.event_count);
+    CHECK_EQ_INT(0, rig.recorder.buzzer_count);
+}
+
+/* hold() ticks at the end of each step, so the Lid first reads open TICK_MS
+ * after the hold starts: holding it open for exactly BOX_LID_LEFT_OPEN_MS
+ * ends one tick short of the threshold. */
+static void test_the_nag_starts_once_the_lid_has_been_open_past_the_threshold(void)
+{
+    Rig rig;
+    uint32_t opened_at_ms;
+    power_up(&rig, readings(false, false));
+    opened_at_ms = rig.now_ms + TICK_MS;
+
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS);
+    CHECK_EQ_INT(0, rig.recorder.buzzer_count);
+
+    hold(&rig, readings(true, false), TICK_MS);
+    CHECK_EQ_INT(1, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 1) {
+        CHECK_BUZZER(rig, 0, true, opened_at_ms + BOX_LID_LEFT_OPEN_MS);
+    }
+}
+
+#define NAG_PERIOD_MS (BOX_NAG_BEEP_ON_MS + BOX_NAG_BEEP_OFF_MS)
+
+/* Compile-time check: the buzzer timing tests expect each beep to start and
+ * end exactly on a tick. */
+typedef char buzzer_times_must_be_whole_ticks[
+    (BOX_DELIVERY_BEEP_MS % TICK_MS == 0 && BOX_LID_LEFT_OPEN_MS % TICK_MS == 0 &&
+     BOX_NAG_BEEP_ON_MS % TICK_MS == 0 && BOX_NAG_BEEP_OFF_MS % TICK_MS == 0) ? 1 : -1];
+
+static void test_the_nag_repeats_while_the_lid_stays_open(void)
+{
+    Rig rig;
+    uint32_t nag_at_ms;
+    int beep;
+    power_up(&rig, readings(false, false));
+    nag_at_ms = rig.now_ms + TICK_MS + BOX_LID_LEFT_OPEN_MS;
+
+    /* Three whole beeps: on, off, on, off, on, off. The fourth beep would
+     * start one tick after the hold ends. */
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS + 3 * NAG_PERIOD_MS);
+
+    CHECK_EQ_INT(6, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 6) {
+        for (beep = 0; beep < 3; beep++) {
+            uint32_t start_ms = nag_at_ms + (uint32_t)beep * NAG_PERIOD_MS;
+            CHECK_BUZZER(rig, 2 * beep, true, start_ms);
+            CHECK_BUZZER(rig, 2 * beep + 1, false, start_ms + BOX_NAG_BEEP_ON_MS);
+        }
+    }
+}
+
+/* The nag stops on the first tick the reed switch reads closed, in the
+ * middle of a beep, without waiting for the close to pass the debounce, and
+ * never comes back while the Lid stays closed. */
+static void test_closing_the_lid_stops_the_nag_at_once(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS + TICK_MS);
+    CHECK_EQ_INT(1, rig.recorder.buzzer_count);     /* the first nag beep */
+
+    hold(&rig, readings(false, false), TICK_MS);    /* the reed closes */
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 2) {
+        CHECK_BUZZER(rig, 1, false, rig.now_ms);
+    }
+
+    hold(&rig, readings(false, false), 60000);
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);
+}
+
+/* The Lid closes exactly when the second nag beep would start, i.e. while
+ * the close is still inside the debounce. No beep starts after the Lid is
+ * shut, not even a short chirp. */
+static void test_closing_the_lid_as_a_nag_beep_is_due_does_not_start_it(void)
+{
+    Rig rig;
+    uint32_t nag_at_ms;
+    power_up(&rig, readings(false, false));
+    nag_at_ms = rig.now_ms + TICK_MS + BOX_LID_LEFT_OPEN_MS;
+
+    /* The first closed tick is exactly one nag period after the nag began. */
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS + NAG_PERIOD_MS);
+    hold(&rig, readings(false, false), 60000);
+
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);     /* only the first beep */
+    if (rig.recorder.buzzer_count == 2) {
+        CHECK_BUZZER(rig, 0, true, nag_at_ms);
+        CHECK_BUZZER(rig, 1, false, nag_at_ms + BOX_NAG_BEEP_ON_MS);
+    }
+}
+
+/* Each opening of the Lid gets the full threshold again: time spent open
+ * before an earlier close doesn't count. Held open for exactly the
+ * threshold, the Lid reads closed on the tick the nag would start. */
+static void test_a_lid_closed_again_before_the_threshold_never_nags(void)
+{
+    Rig rig;
+    power_up(&rig, readings(false, false));
+
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS);
+    hold(&rig, readings(false, false), 5000);
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS);
+    hold(&rig, readings(false, false), 60000);
+
+    CHECK_EQ_INT(2, rig.recorder.event_count);      /* two Opened while empty */
+    CHECK_EQ_INT(0, rig.recorder.buzzer_count);
+}
+
+/* The Courier leaves the Lid open long enough to be nagged, then closes it
+ * with the parcel inside: the nag stops at the close, and the Delivery still
+ * gets its one full beep after the settle. */
+static void test_a_nag_before_a_delivery_does_not_change_the_delivery_beep(void)
+{
+    Rig rig;
+    uint32_t delivered_at_ms;
+    int n;
+    power_up(&rig, readings(false, false));
+
+    hold(&rig, readings(true, true), BOX_LID_LEFT_OPEN_MS + 2 * NAG_PERIOD_MS);
+    hold(&rig, readings(false, true), 5000);
+    hold(&rig, readings(false, true), 5000);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+    delivered_at_ms = rig.recorder.event_times_ms[0];
+
+    /* Nag beeps (on, off, ...) that all end by the close, then the Delivery
+     * beep, whole. */
+    n = rig.recorder.buzzer_count;
+    CHECK(n >= 6 && n <= MAX_BUZZER_RECORDED && n % 2 == 0);
+    if (n >= 6 && n <= MAX_BUZZER_RECORDED) {
+        /* The settle runs from the real close, so that is when it was. The
+         * nag's last command is off, at or before it. */
+        CHECK_EQ_INT(false, rig.recorder.buzzer_on[n - 3]);
+        CHECK(rig.recorder.buzzer_times_ms[n - 3] <=
+              delivered_at_ms - BOX_SETTLE_TIME_MS);
+        CHECK_BUZZER(rig, n - 2, true, delivered_at_ms);
+        CHECK_BUZZER(rig, n - 1, false, delivered_at_ms + BOX_DELIVERY_BEEP_MS);
+    }
+}
+
+/* The Lid opens again right as the Delivery beep starts: the beep still
+ * lasts its full length, and the new opening doesn't nag before its own
+ * threshold. */
+static void test_reopening_the_lid_during_the_delivery_beep_does_not_cut_it_short(void)
+{
+    Rig rig;
+    uint32_t delivered_at_ms;
+    power_up(&rig, readings(false, false));
+    hold(&rig, readings(true, false), 1000);
+
+    /* The settle ends on the last tick of this hold. */
+    hold(&rig, readings(false, true), BOX_SETTLE_TIME_MS + TICK_MS);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+    delivered_at_ms = rig.now_ms;
+
+    hold(&rig, readings(true, true), BOX_LID_LEFT_OPEN_MS);
+
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 2) {
+        CHECK_BUZZER(rig, 0, true, delivered_at_ms);
+        CHECK_BUZZER(rig, 1, false, delivered_at_ms + BOX_DELIVERY_BEEP_MS);
+    }
+}
+
+/* Decision: a Lid open at boot is a Lid left open too, so the nag doesn't
+ * wait for the starting state. Its time is counted from boot, the earliest
+ * the Box can know the Lid was open. Closing it stops the nag as usual. */
+static void test_a_lid_open_at_boot_nags_once_past_the_threshold(void)
+{
+    Rig rig;
+    boot(&rig, readings(true, false));
+
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS - TICK_MS);
+    CHECK_EQ_INT(0, rig.recorder.buzzer_count);
+
+    hold(&rig, readings(true, false), TICK_MS);
+    CHECK_EQ_INT(1, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 1) {
+        CHECK_BUZZER(rig, 0, true, BOX_LID_LEFT_OPEN_MS);
+    }
+    CHECK_EQ_INT(0, rig.recorder.status_count);     /* still no starting state */
+
+    hold(&rig, readings(false, false), TICK_MS);    /* the reed closes */
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 2) {
+        CHECK_BUZZER(rig, 1, false, rig.now_ms);
+    }
+    hold(&rig, readings(false, false), 60000);
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);
+}
+
+/* HAL_GetTick() wraps to 0 after about 49.7 days. Boot so that the clock
+ * wraps 100 ms into the Delivery beep: it still lasts its full length. */
+static void test_the_delivery_beep_keeps_time_across_the_millisecond_wraparound(void)
+{
+    Rig rig;
+    uint32_t delivered_at_ms;
+    /* Settle, open 1000 ms, then the Delivery one tick past the next settle:
+     * 5010 ms after boot, and the wrap is 100 ms later. */
+    boot_at(&rig, readings(false, false), 0u - (5010u + 100u));
+    hold(&rig, readings(false, false), BOX_SETTLE_TIME_MS);
+    hold(&rig, readings(true, false), 1000);
+    hold(&rig, readings(false, true), BOX_SETTLE_TIME_MS + TICK_MS);
+    CHECK_ONLY_EVENT(rig, BOX_EVENT_DELIVERED);
+    delivered_at_ms = rig.now_ms;
+
+    hold(&rig, readings(false, true), 5000);
+
+    CHECK_EQ_INT(2, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 2) {
+        CHECK_BUZZER(rig, 0, true, delivered_at_ms);
+        CHECK_BUZZER(rig, 1, false, delivered_at_ms + BOX_DELIVERY_BEEP_MS);
+        /* The beep really straddles the wrap. */
+        CHECK(rig.recorder.buzzer_times_ms[1] < rig.recorder.buzzer_times_ms[0]);
+    }
+}
+
+/* Boot so that the clock wraps during the second nag beep: the threshold
+ * and every beep keep their times. */
+static void test_the_nag_keeps_time_across_the_millisecond_wraparound(void)
+{
+    Rig rig;
+    uint32_t nag_at_ms;
+    int beep;
+    /* The Lid opens one tick after the settle, so the nag starts
+     * BOX_SETTLE_TIME_MS + TICK_MS + BOX_LID_LEFT_OPEN_MS after boot, and
+     * the wrap comes 1100 ms after that, during the second beep. */
+    boot_at(&rig, readings(false, false),
+            0u - (BOX_SETTLE_TIME_MS + TICK_MS + BOX_LID_LEFT_OPEN_MS + 1100u));
+    hold(&rig, readings(false, false), BOX_SETTLE_TIME_MS);
+    nag_at_ms = rig.now_ms + TICK_MS + BOX_LID_LEFT_OPEN_MS;
+
+    hold(&rig, readings(true, false), BOX_LID_LEFT_OPEN_MS + 3 * NAG_PERIOD_MS);
+
+    CHECK_EQ_INT(6, rig.recorder.buzzer_count);
+    if (rig.recorder.buzzer_count == 6) {
+        for (beep = 0; beep < 3; beep++) {
+            uint32_t start_ms = nag_at_ms + (uint32_t)beep * NAG_PERIOD_MS;
+            CHECK_BUZZER(rig, 2 * beep, true, start_ms);
+            CHECK_BUZZER(rig, 2 * beep + 1, false, start_ms + BOX_NAG_BEEP_ON_MS);
+        }
+        /* The second beep really straddles the wrap. */
+        CHECK(rig.recorder.buzzer_times_ms[3] < rig.recorder.buzzer_times_ms[2]);
+    }
+}
+
 int main(void)
 {
     RUN_TEST(test_empty_box_lid_cycle_with_parcel_left_inside_is_one_delivery);
@@ -587,5 +898,17 @@ int main(void)
     RUN_TEST(test_a_lid_cycle_that_changes_nothing_reports_lid_open_then_lid_closed);
     RUN_TEST(test_a_delivery_also_reports_the_change_to_occupied);
     RUN_TEST(test_no_box_status_is_reported_when_nothing_changes);
+    RUN_TEST(test_a_delivery_is_one_short_beep);
+    RUN_TEST(test_collections_and_opened_lid_cycles_do_not_beep);
+    RUN_TEST(test_the_nag_starts_once_the_lid_has_been_open_past_the_threshold);
+    RUN_TEST(test_the_nag_repeats_while_the_lid_stays_open);
+    RUN_TEST(test_closing_the_lid_stops_the_nag_at_once);
+    RUN_TEST(test_closing_the_lid_as_a_nag_beep_is_due_does_not_start_it);
+    RUN_TEST(test_a_lid_closed_again_before_the_threshold_never_nags);
+    RUN_TEST(test_a_nag_before_a_delivery_does_not_change_the_delivery_beep);
+    RUN_TEST(test_reopening_the_lid_during_the_delivery_beep_does_not_cut_it_short);
+    RUN_TEST(test_a_lid_open_at_boot_nags_once_past_the_threshold);
+    RUN_TEST(test_the_delivery_beep_keeps_time_across_the_millisecond_wraparound);
+    RUN_TEST(test_the_nag_keeps_time_across_the_millisecond_wraparound);
     return TEST_SUMMARY();
 }
