@@ -48,7 +48,7 @@ It is **read-only**: no buttons that change the Box, no login. That keeps it sim
 - **It's what the Owner (and the graders) actually see.** In the demo, the Dashboard flipping from Empty to Occupied the moment a parcel drops in is the "wow" moment.
 - **Telegram tells you something happened. The Dashboard tells you the current state and the history.** "Is there a parcel in my Box right now?" is answered here.
 - **It proves the cloud part works.** The course requires a cloud connection, and this is the visible proof.
-- **It shows whether the Box is alive.** If the Box loses power or WiFi, the light goes offline, so silence isn't mistaken for "nothing happened".
+- **It shows whether the Box is alive.** If the Box loses power or WiFi, or it rebooted with the Lid open and is waiting for it to close (see [product.md section 5](../../product.md#uart-protocol-the-contract-between-the-boards)), the light goes offline, so silence isn't mistaken for "nothing happened".
 
 ---
 

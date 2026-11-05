@@ -31,6 +31,24 @@ jobs:
             echo "::notice::No 'make test' target yet, so skipping."
           fi
 
+  stm32-build:
+    name: STM32 firmware builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for STM32 project
+        id: check
+        run: echo "exists=$([ -f stm32/Makefile ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Build with arm-none-eabi-gcc
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi binutils-arm-none-eabi make
+          make -C stm32
+      - name: Skip notice
+        if: steps.check.outputs.exists != 'true'
+        run: echo "::notice::No stm32/Makefile yet, so skipping."
+
   esp32-build:
     name: ESP32 firmware builds
     runs-on: ubuntu-latest

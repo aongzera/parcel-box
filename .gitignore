@@ -8,6 +8,15 @@ secrets.h
 stm32/**/Debug/
 stm32/**/Release/
 
+# STM32CubeIDE per-machine state (stm32/.project, .cproject and parcel-box.ioc
+# ARE committed). .settings/ holds each user's IDE preferences and language
+# settings; .mxproject is CubeMX's record of what it last generated, rewritten
+# on every code generation.
+stm32/.settings/
+stm32/.mxproject
+# Run/Debug configurations hold per-probe ST-LINK settings.
+stm32/*.launch
+
 # PC test build output
 build/
 

@@ -66,16 +66,19 @@ Opened while occupied exists because the IR sensor can only say "something is in
 
 Other rules:
 - The reed switch is debounced (~50 ms), so a wobble counts as one Lid cycle.
-- At power-up, the Box reads its starting state and emits **no** Event, so there are no false Alerts.
+- If the Lid reopens during the settle, the Lid cycle continues: the settle restarts on the next close, and the outcome compares against the state before the first open.
+- At power-up, the Box reads its starting state and emits **no** Event, so there are no false Alerts. It reads that state once the Lid has been closed for one settle time (so ~2 s after boot, or after the Lid closes if it was open at boot), then sends its first Box status. A Lid cycle that starts before then is part of power-up and emits no Event.
 
 ### Buzzer
 
-- A single short beep when a Delivery is registered. This is the Courier's confirmation.
-- A repeating beep if the Lid stays open longer than about 30 s, which stops as soon as it closes.
+- A single short beep (about 150 ms) when a Delivery is registered. This is the Courier's confirmation. No other outcome beeps.
+- A repeating beep (the nag: 200 ms on, 800 ms off) if the Lid stays open longer than 30 s, which stops as soon as it closes. Each opening gets the full 30 s again.
+- The nag also covers a Lid that is open when the Box is switched on: it counts from power-up, without waiting for the Box to know whether it is Empty or Occupied.
+- The two never cut each other short: the buzzer sounds while either one wants it.
 
 ### Without WiFi
 
-The Box keeps detecting Lid cycles and beeping locally. Events are queued and delivered, in order and with their original times, once the connection comes back.
+The Box keeps detecting Lid cycles and beeping locally. Events are queued and delivered, in order and with their original times, once the connection comes back. "Original time" means when the Event arrived at the ESP32 from the STM32, since the ESP32 stamps each Event on arrival. Only the ESP32's offline queue keeps that time. The few seconds an Event may wait in the STM32's outbox before it reaches the ESP32 (e.g. while the ESP32 reboots or the UART wire is loose) aren't kept: the Event gets the time it finally arrived.
 
 ## 5. Architecture
 
@@ -112,17 +115,37 @@ The Box keeps detecting Lid cycles and beeping locally. Events are queued and de
 
 ### UART protocol (the contract between the boards)
 
-- 115200 baud, 8N1, ASCII, one message per line ending in a newline. Fields are comma-separated, and unknown lines are ignored.
+- 115200 baud, 8N1, ASCII, one message per line ending in a newline. Fields are comma-separated, and unknown lines are ignored. (`BOOT` is not an unknown line: the ESP32 must handle it, see below.)
 
 | Direction | Message | Meaning |
 |---|---|---|
-| STM32 → ESP32 | `EVT,<seq>,<OUTCOME>` | An Event. The outcome is one of the four names in section 4. |
-| STM32 → ESP32 | `STS,<EMPTY\|OCCUPIED>,<LID_OPEN\|LID_CLOSED>` | **Box status**. Sent on every change and every few seconds as a heartbeat. |
+| STM32 → ESP32 | `BOOT` | The STM32 (re)started: a new **session** begins, and its Event sequence numbers start again at 1. Sent once the Box knows its starting state, right after the first STS, and resent every 1 s until `ACK,0`. |
+| ESP32 → STM32 | `ACK,0` | The reply to `BOOT`: the new session is open. |
+| STM32 → ESP32 | `EVT,<seq>,<OUTCOME>` | An Event. The outcome is one of the four names in section 4. Never sent in a session before its `ACK,0`. |
+| STM32 → ESP32 | `STS,<EMPTY\|OCCUPIED>,<LID_OPEN\|LID_CLOSED>` | **Box status**. Sent on every change and every few seconds as a heartbeat, but not until the Box knows its starting state after boot (see below). |
 | ESP32 → STM32 | `ACK,<seq>` | The Event was accepted. The STM32 resends until it gets this. |
 
-The ESP32 ACKs a duplicate sequence number but ignores it, so each Event is delivered exactly once. A lower sequence number, or a heartbeat after a long silence, means the STM32 rebooted: start a new session and don't treat it as a duplicate.
+**Sending Events (the STM32's Event sender, `box_sender.h`):**
 
-**Why plain text matters:** either board can be tested alone by typing or reading these lines in a serial monitor. You can drive the ESP32 and Dashboard without an STM32 by typing `EVT,1,DELIVERED`.
+- First the session: `BOOT` until `ACK,0` (below). Only then do Events go out.
+- Each Event gets its sequence number when it happens: 1 for the first after power-up, then one more for each Event.
+- Events wait in a small outbox (8 Events, counting the one being sent) and leave strictly in order, one at a time. The oldest is sent at once, then again every **1 s** until `ACK,<its seq>` arrives; then the next one is sent at once. An `ACK` for any other sequence number is ignored, so a late or repeated `ACK` is harmless.
+- **Outbox full** (the ESP32 hasn't ACKed for a while): a new Event drops the oldest one that is only waiting, and the debug log says `# Outbox full: dropped Event <seq>`. Once the session is open, that is the one behind the Event being sent, which is never dropped, since the ESP32 may already have it. Before `ACK,0` nothing has been sent, so the oldest Event is dropped and the newest 8 are kept. Like the ESP32's offline queue, this keeps the newest Events, and the sequence numbers sent still only go up (with a gap). The outbox doesn't survive a reboot (section 10).
+
+**Sessions and duplicates (what the ESP32 must do):**
+
+- On every `BOOT`, reply `ACK,0` and start a new session: forget the last accepted sequence number. A repeated `BOOT` (its `ACK,0` was lost) just does this again, which is harmless, because the STM32 sends no `EVT` until an `ACK,0` arrives.
+- On every `EVT,<seq>,...`, reply `ACK,<seq>`. Accept the Event only if `<seq>` is higher than the last one accepted in this session; otherwise it is a resend of one already accepted: ACK it but ignore it. So each Event is delivered exactly once.
+- After the ESP32 itself starts, no Event has been accepted yet in this session, so it accepts the next `EVT` whatever its number.
+- **Known limitation:** if the ESP32 reboots after accepting an Event but before the STM32 gets its `ACK`, the STM32 resends that Event and the restarted ESP32 accepts it again, so it appears twice in the Event log (and may raise a second Alert).
+- A lower sequence number, or a gap in the heartbeat, no longer means anything for sessions: only `BOOT` starts one. A gap in the numbers is normal (outbox full, see above).
+- On the STM32: until `ACK,0` arrives, every other `ACK` is ignored, so a late `ACK` from before the reboot can't complete the new session's Event 1. Events that happen meanwhile wait in the outbox, and the first goes out as soon as `ACK,0` arrives.
+
+Why a `BOOT` line resent until ACKed, and not a session id in every `EVT`: without it, a reboot can't be told from a duplicate. If the old session sent exactly one Event and the STM32 restarts within a heartbeat, the new `EVT,1` has the same number as the last one accepted, and the ~2 s of silence after boot looks like a normal heartbeat gap, so the ESP32 would drop a real Event. A single unacknowledged `BOOT` could be lost on the wire, so it is resent like an Event, and no `EVT` can overtake it. A per-boot id would need something unique on every boot. The F411 has no random number generator. A boot counter would need a flash write per boot, or the RTC backup registers, which reset on power loss (VBAT is tied to VDD on the Nucleo), so two sessions could still get the same id. `BOOT`/`ACK,0` needs no storage, reuses the resend-until-ACK logic (`BOOT` counts as sequence number 0; Events start at 1), and a person can type both lines in a serial monitor.
+
+After a reboot the STM32 sends **no** line at all, not even a heartbeat or `BOOT`, until it knows its starting state (section 4): about 2 s after boot, or, if the Lid was open at boot, only once it has closed and settled. After a normal boot this silence is ~2 s, too short to show. If the Lid stays open after a reboot, the Dashboard shows the Box offline until the Lid closes and settles. STS has no "unknown" value; the first STS after boot is the real starting state.
+
+**Why plain text matters:** either board can be tested alone by typing or reading these lines in a serial monitor. You can drive the ESP32 and Dashboard without an STM32 by typing `EVT,1,DELIVERED` (type `BOOT` first to start a fresh session, so `EVT,1` isn't taken for a duplicate). To stand in for the ESP32, type `ACK,0` after `BOOT`, then `ACK,<seq>` for each Event.
 
 ### Cloud (ADR 0002)
 
@@ -148,7 +171,7 @@ The ESP32 ACKs a duplicate sequence number but ignores it, so each Event is deli
 
 | Path | What lives there |
 |---|---|
-| `stm32/` | The STM32CubeIDE project (NUCLEO-F411RE, HAL), including the Box logic core |
+| `stm32/` | The STM32CubeIDE project (NUCLEO-F411RE, HAL), generated by CubeMX from `parcel-box.ioc` (open it for the pin view). `BoxCore/` is the Box logic core and the UART line writer, `Core/` the hardware adapter (hand-written code inside `USER CODE` blocks, so regenerating keeps it), `Drivers/` ST's HAL and CMSIS. `stm32/Makefile` builds the same sources from the command line and in CI. |
 | `esp32/` | The PlatformIO project (Arduino framework) for the ESP32-S3 bridge |
 | `cloud/` | The Dashboard page, Firebase rules and hosting config |
 | `docs/` | ADRs, the pin map ([docs/pinmap.md](docs/pinmap.md)), agent setup and the manual test checklists |
@@ -160,7 +183,7 @@ The folders fill in as the tickets land.
 
 ## 7. Testing and CI
 
-- **Automated, the only automated suite:** the Box logic core, compiled and run **on a PC** with `make test` from the repo root. Tests feed in sensor timelines and ticks, and check only what comes out (Events, Box status changes, buzzer commands). They never check internal variables.
+- **Automated, the only automated suite:** the Box logic core and the UART line writer, compiled and run **on a PC** with `make test` from the repo root. Tests feed in sensor timelines and ticks, and check only what comes out (Events, Box status changes, buzzer commands, UART lines). They never check internal variables.
 - **Manual checklists** in `docs/`, written so non-coders can run them:
   - the ESP32 alone (typing UART lines);
   - the STM32 alone (reading its UART output);
@@ -168,6 +191,7 @@ The folders fill in as the tickets land.
 - **CI** (`.github/workflows/ci.yml`, on PRs and on pushes to `main`):
   - the secrets guard;
   - `make test`;
+  - a build of the STM32 firmware with `make -C stm32` (arm-none-eabi-gcc);
   - a PlatformIO build of `esp32/` with placeholder secrets.
 
   Jobs for parts that don't exist yet skip themselves.
