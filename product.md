@@ -115,25 +115,37 @@ The Box keeps detecting Lid cycles and beeping locally. Events are queued and de
 
 ### UART protocol (the contract between the boards)
 
-- 115200 baud, 8N1, ASCII, one message per line ending in a newline. Fields are comma-separated, and unknown lines are ignored.
+- 115200 baud, 8N1, ASCII, one message per line ending in a newline. Fields are comma-separated, and unknown lines are ignored. (`BOOT` is not an unknown line: the ESP32 must handle it, see below.)
 
 | Direction | Message | Meaning |
 |---|---|---|
-| STM32 → ESP32 | `EVT,<seq>,<OUTCOME>` | An Event. The outcome is one of the four names in section 4. |
+| STM32 → ESP32 | `BOOT` | The STM32 (re)started: a new **session** begins, and its Event sequence numbers start again at 1. Sent once the Box knows its starting state, right after the first STS, and resent every 1 s until `ACK,0`. |
+| ESP32 → STM32 | `ACK,0` | The reply to `BOOT`: the new session is open. |
+| STM32 → ESP32 | `EVT,<seq>,<OUTCOME>` | An Event. The outcome is one of the four names in section 4. Never sent in a session before its `ACK,0`. |
 | STM32 → ESP32 | `STS,<EMPTY\|OCCUPIED>,<LID_OPEN\|LID_CLOSED>` | **Box status**. Sent on every change and every few seconds as a heartbeat, but not until the Box knows its starting state after boot (see below). |
 | ESP32 → STM32 | `ACK,<seq>` | The Event was accepted. The STM32 resends until it gets this. |
 
 **Sending Events (the STM32's Event sender, `box_sender.h`):**
 
+- First the session: `BOOT` until `ACK,0` (below). Only then do Events go out.
 - Each Event gets its sequence number when it happens: 1 for the first after power-up, then one more for each Event.
 - Events wait in a small outbox (8 Events, counting the one being sent) and leave strictly in order, one at a time. The oldest is sent at once, then again every **1 s** until `ACK,<its seq>` arrives; then the next one is sent at once. An `ACK` for any other sequence number is ignored, so a late or repeated `ACK` is harmless.
-- **Outbox full** (the ESP32 hasn't ACKed for a while): a new Event drops the oldest one waiting behind the one being sent, and the debug log says `# Outbox full: dropped Event <seq>`. The one being sent is never dropped, since the ESP32 may already have it. Like the ESP32's offline queue, this keeps the newest Events, and the sequence numbers sent still only go up (with a gap). The outbox doesn't survive a reboot (section 10).
+- **Outbox full** (the ESP32 hasn't ACKed for a while): a new Event drops the oldest one that is only waiting, and the debug log says `# Outbox full: dropped Event <seq>`. Once the session is open, that is the one behind the Event being sent, which is never dropped, since the ESP32 may already have it. Before `ACK,0` nothing has been sent, so the oldest Event is dropped and the newest 8 are kept. Like the ESP32's offline queue, this keeps the newest Events, and the sequence numbers sent still only go up (with a gap). The outbox doesn't survive a reboot (section 10).
 
-The ESP32 ACKs a duplicate sequence number but ignores it, so each Event is delivered exactly once. A lower sequence number, or a heartbeat after a long silence, means the STM32 rebooted: start a new session and don't treat it as a duplicate.
+**Sessions and duplicates (what the ESP32 must do):**
 
-After a reboot the STM32 sends **no** line at all, not even a heartbeat, until it knows its starting state (section 4): about 2 s after boot, or, if the Lid was open at boot, only once it has closed and settled. After a normal boot this silence is ~2 s, too short to show. If the Lid stays open after a reboot, the Dashboard shows the Box offline until the Lid closes and settles. STS has no "unknown" value; the first STS after boot is the real starting state.
+- On every `BOOT`, reply `ACK,0` and start a new session: forget the last accepted sequence number. A repeated `BOOT` (its `ACK,0` was lost) just does this again, which is harmless, because the STM32 sends no `EVT` until an `ACK,0` arrives.
+- On every `EVT,<seq>,...`, reply `ACK,<seq>`. Accept the Event only if `<seq>` is higher than the last one accepted in this session; otherwise it is a resend of one already accepted: ACK it but ignore it. So each Event is delivered exactly once.
+- After the ESP32 itself starts, no Event has been accepted yet in this session, so it accepts the next `EVT` whatever its number.
+- **Known limitation:** if the ESP32 reboots after accepting an Event but before the STM32 gets its `ACK`, the STM32 resends that Event and the restarted ESP32 accepts it again, so it appears twice in the Event log (and may raise a second Alert).
+- A lower sequence number, or a gap in the heartbeat, no longer means anything for sessions: only `BOOT` starts one. A gap in the numbers is normal (outbox full, see above).
+- On the STM32: until `ACK,0` arrives, every other `ACK` is ignored, so a late `ACK` from before the reboot can't complete the new session's Event 1. Events that happen meanwhile wait in the outbox, and the first goes out as soon as `ACK,0` arrives.
 
-**Why plain text matters:** either board can be tested alone by typing or reading these lines in a serial monitor. You can drive the ESP32 and Dashboard without an STM32 by typing `EVT,1,DELIVERED`.
+Why a `BOOT` line resent until ACKed, and not a session id in every `EVT`: without it, a reboot can't be told from a duplicate. If the old session sent exactly one Event and the STM32 restarts within a heartbeat, the new `EVT,1` has the same number as the last one accepted, and the ~2 s of silence after boot looks like a normal heartbeat gap, so the ESP32 would drop a real Event. A single unacknowledged `BOOT` could be lost on the wire, so it is resent like an Event, and no `EVT` can overtake it. A per-boot id would need something unique on every boot. The F411 has no random number generator. A boot counter would need a flash write per boot, or the RTC backup registers, which reset on power loss (VBAT is tied to VDD on the Nucleo), so two sessions could still get the same id. `BOOT`/`ACK,0` needs no storage, reuses the resend-until-ACK logic (`BOOT` counts as sequence number 0; Events start at 1), and a person can type both lines in a serial monitor.
+
+After a reboot the STM32 sends **no** line at all, not even a heartbeat or `BOOT`, until it knows its starting state (section 4): about 2 s after boot, or, if the Lid was open at boot, only once it has closed and settled. After a normal boot this silence is ~2 s, too short to show. If the Lid stays open after a reboot, the Dashboard shows the Box offline until the Lid closes and settles. STS has no "unknown" value; the first STS after boot is the real starting state.
+
+**Why plain text matters:** either board can be tested alone by typing or reading these lines in a serial monitor. You can drive the ESP32 and Dashboard without an STM32 by typing `EVT,1,DELIVERED` (type `BOOT` first to start a fresh session, so `EVT,1` isn't taken for a duplicate). To stand in for the ESP32, type `ACK,0` after `BOOT`, then `ACK,<seq>` for each Event.
 
 ### Cloud (ADR 0002)
 

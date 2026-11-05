@@ -37,6 +37,13 @@
 /* Room for the longest line, "EVT,4294967295,OPENED_OCCUPIED\n", and its NUL. */
 #define BOX_LINE_MAX 40
 
+/* The line that opens a session after every boot (product.md section 5),
+ * and the sequence number its ACK carries: `ACK,0`. Events are numbered
+ * from 1, so no Event's ACK can be taken for it. The Event sender
+ * (box_sender.h) sends it. */
+#define BOX_BOOT_LINE "BOOT\n"
+#define BOX_BOOT_SEQ  0u
+
 /* How long after the last STS line the Box status is sent again. Well under
  * the Dashboard's ~30 s offline threshold. */
 #define BOX_STS_HEARTBEAT_MS 5000u

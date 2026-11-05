@@ -1,6 +1,7 @@
 /*
- * PC tests for the Event sender (box_sender). Each test adds Events, feeds
- * ACKs and ticks, then checks only the EVT lines it wrote.
+ * PC tests for the Event sender (box_sender). Each test starts the session
+ * (BOOT) or finds it open, adds Events, feeds ACKs and ticks, then checks
+ * only the BOOT and EVT lines it wrote.
  */
 #include <string.h>
 
@@ -43,7 +44,8 @@ typedef struct {
     Recorder recorder;
 } Rig;
 
-static void start(Rig *rig)
+/* A sender just after power-up: no session yet. */
+static void power_up(Rig *rig)
 {
     BoxSenderOutputs outputs;
     memset(rig, 0, sizeof *rig);
@@ -51,6 +53,16 @@ static void start(Rig *rig)
     outputs.write_line = record_line;
     outputs.on_dropped = record_drop;
     box_sender_init(&rig->sender, outputs);
+}
+
+/* A sender whose session is open (BOOT sent and ACKed at 0 ms), with the
+ * BOOT line forgotten, so a test sees only the lines it causes. */
+static void start(Rig *rig)
+{
+    power_up(rig);
+    box_sender_start(&rig->sender, 0);
+    box_sender_ack(&rig->sender, BOX_BOOT_SEQ, 0);
+    memset(&rig->recorder, 0, sizeof rig->recorder);
 }
 
 #define CHECK_LINE(rig, index, expected)                                  \
@@ -65,7 +77,214 @@ static void start(Rig *rig)
         }                                                                 \
     } while (0)
 
-/* ---- Tests --------------------------------------------------------------- */
+/* ---- Tests: the session (BOOT) ------------------------------------------- */
+
+static void test_nothing_is_sent_before_the_session_starts(void)
+{
+    Rig rig;
+    power_up(&rig);
+
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, 5000);
+    box_sender_tick(&rig.sender, 5000 + 5 * BOX_SENDER_RESEND_MS);
+
+    CHECK_EQ_INT(0, rig.recorder.count);
+}
+
+static void test_starting_the_session_sends_boot(void)
+{
+    Rig rig;
+    power_up(&rig);
+
+    box_sender_start(&rig.sender, 2000);
+
+    CHECK_EQ_INT(1, rig.recorder.count);
+    CHECK_LINE(&rig, 0, "BOOT\n");
+}
+
+static void test_starting_the_session_again_sends_nothing(void)
+{
+    Rig rig;
+    power_up(&rig);
+    box_sender_start(&rig.sender, 2000);
+
+    box_sender_start(&rig.sender, 2500);
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 2600);
+    box_sender_start(&rig.sender, 2700);
+
+    CHECK_EQ_INT(1, rig.recorder.count);
+}
+
+static void test_boot_is_resent_until_its_ack(void)
+{
+    Rig rig;
+    power_up(&rig);
+    box_sender_start(&rig.sender, 2000);
+
+    /* BOOT or its ACK,0 is lost twice. */
+    box_sender_tick(&rig.sender, 2000 + BOX_SENDER_RESEND_MS - 10);
+    CHECK_EQ_INT(1, rig.recorder.count);
+    box_sender_tick(&rig.sender, 2000 + BOX_SENDER_RESEND_MS);
+    box_sender_tick(&rig.sender, 2000 + 2 * BOX_SENDER_RESEND_MS);
+    CHECK_EQ_INT(3, rig.recorder.count);
+    CHECK_LINE(&rig, 1, "BOOT\n");
+    CHECK_LINE(&rig, 2, "BOOT\n");
+
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 4010);
+    box_sender_tick(&rig.sender, 4010 + 10 * BOX_SENDER_RESEND_MS);
+    CHECK_EQ_INT(3, rig.recorder.count);
+}
+
+static void test_events_wait_for_the_session_then_leave_in_order(void)
+{
+    Rig rig;
+    power_up(&rig);
+    box_sender_start(&rig.sender, 2000);
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, 2100);
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, 2200);
+
+    /* Unacked BOOT: it, not an Event, is what gets resent. */
+    box_sender_tick(&rig.sender, 2000 + BOX_SENDER_RESEND_MS);
+    CHECK_EQ_INT(2, rig.recorder.count);
+    CHECK_LINE(&rig, 1, "BOOT\n");
+
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 3010);
+    CHECK_EQ_INT(3, rig.recorder.count);
+    CHECK_LINE(&rig, 2, "EVT,1,DELIVERED\n");
+
+    box_sender_ack(&rig.sender, 1, 3020);
+    CHECK_EQ_INT(4, rig.recorder.count);
+    CHECK_LINE(&rig, 3, "EVT,2,COLLECTED\n");
+}
+
+static void test_a_late_ack_from_before_the_reboot_is_ignored_while_booting(void)
+{
+    Rig rig;
+    power_up(&rig);
+    box_sender_start(&rig.sender, 2000);
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, 2100);
+
+    box_sender_ack(&rig.sender, 1, 2200);   /* the old session's ACK,1 */
+    CHECK_EQ_INT(1, rig.recorder.count);    /* no EVT: still booting */
+
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 2300);
+    CHECK_EQ_INT(2, rig.recorder.count);
+    CHECK_LINE(&rig, 1, "EVT,1,DELIVERED\n");
+    /* Event 1 is still in flight: the old ACK didn't complete it. */
+    box_sender_tick(&rig.sender, 2300 + BOX_SENDER_RESEND_MS);
+    CHECK_EQ_INT(3, rig.recorder.count);
+    CHECK_LINE(&rig, 2, "EVT,1,DELIVERED\n");
+}
+
+static void test_a_full_outbox_before_the_session_opens_drops_the_oldest_event(void)
+{
+    Rig rig;
+    uint32_t i;
+    power_up(&rig);
+    box_sender_start(&rig.sender, 2000);
+    /* Nothing ACKs BOOT, so no Event has been sent: keep the newest ones. */
+    for (i = 0; i < BOX_SENDER_CAPACITY + 1u; i++) {
+        box_sender_add(&rig.sender, BOX_EVENT_OPENED_EMPTY, 2100u + 100u * i);
+    }
+    CHECK_EQ_INT(1, rig.recorder.drop_count);
+    CHECK_EQ_INT(1, rig.recorder.dropped_seqs[0]);
+
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 4000);
+    CHECK_EQ_INT(2, rig.recorder.count);
+    CHECK_LINE(&rig, 1, "EVT,2,OPENED_EMPTY\n");
+}
+
+static void test_ack_says_whether_it_was_accepted(void)
+{
+    Rig rig;
+    power_up(&rig);
+    box_sender_start(&rig.sender, 2000);
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, 2100);
+
+    CHECK(!box_sender_ack(&rig.sender, 1, 2200));             /* booting: stale */
+    CHECK(box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 2300));   /* session open */
+    CHECK(!box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 2310));  /* repeated ACK,0 */
+    CHECK(!box_sender_ack(&rig.sender, 2, 2320));             /* not in flight */
+    CHECK(box_sender_ack(&rig.sender, 1, 2330));              /* Event 1 done */
+    CHECK(!box_sender_ack(&rig.sender, 1, 2340));             /* duplicate */
+}
+
+static void test_ack_0_once_the_session_is_open_is_ignored(void)
+{
+    Rig rig;
+    start(&rig);
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, 5000);
+
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 5010);   /* a repeated ACK,0 */
+    box_sender_tick(&rig.sender, 5000 + BOX_SENDER_RESEND_MS);
+
+    CHECK_EQ_INT(2, rig.recorder.count);
+    CHECK_LINE(&rig, 1, "EVT,1,DELIVERED\n");
+}
+
+/*
+ * The ESP32's side of the contract (product.md section 5), as a model to
+ * run the sender's lines through: BOOT starts a new session (forget the
+ * last accepted seq); an EVT with a seq at or below the last accepted one
+ * in this session is a duplicate. Returns how many Events it accepted.
+ */
+typedef struct {
+    uint32_t last_seq;   /* 0: none accepted in this session */
+    int accepted;
+} Esp32Model;
+
+static void esp32_read(Esp32Model *esp, const Recorder *r, int from, int to)
+{
+    int i;
+    for (i = from; i < to && i < MAX_LINES; i++) {
+        const char *line = r->lines[i];
+        if (strcmp(line, "BOOT\n") == 0) {
+            esp->last_seq = 0;
+        } else if (strncmp(line, "EVT,", 4) == 0) {
+            uint32_t seq = 0;
+            const char *p;
+            for (p = line + 4; *p >= '0' && *p <= '9'; p++) {
+                seq = seq * 10u + (uint32_t)(*p - '0');
+            }
+            if (seq > esp->last_seq) {
+                esp->last_seq = seq;
+                esp->accepted++;
+            }
+        }
+    }
+}
+
+static void test_a_reboot_after_exactly_one_event_is_not_taken_for_a_duplicate(void)
+{
+    Rig rig;
+    Esp32Model esp = {0, 0};
+    int before_reboot;
+
+    /* Session 1: one Delivery, resent once (its ACK lost), then ACKed. */
+    power_up(&rig);
+    box_sender_start(&rig.sender, 2000);
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 2010);
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, 3000);
+    box_sender_tick(&rig.sender, 3000 + BOX_SENDER_RESEND_MS);
+    box_sender_ack(&rig.sender, 1, 4010);
+    before_reboot = rig.recorder.count;
+
+    /* Reboot 2 s later (well within a heartbeat). Session 2: BOOT's first
+     * send is lost on the wire, then a Collection. */
+    box_sender_init(&rig.sender, rig.sender.outputs);
+    box_sender_start(&rig.sender, 2000);
+    rig.recorder.lines[before_reboot][0] = '\0';   /* the ESP32 never read it */
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, 2500);
+    box_sender_tick(&rig.sender, 2000 + BOX_SENDER_RESEND_MS);
+    box_sender_ack(&rig.sender, BOX_BOOT_SEQ, 3010);
+    box_sender_tick(&rig.sender, 3010 + BOX_SENDER_RESEND_MS);   /* ACK,1 lost */
+    box_sender_ack(&rig.sender, 1, 4020);
+
+    esp32_read(&esp, &rig.recorder, 0, rig.recorder.count);
+    CHECK_EQ_INT(2, esp.accepted);   /* each Event once: the resends were dropped */
+    CHECK_LINE(&rig, rig.recorder.count - 1, "EVT,1,COLLECTED\n");
+}
+
+/* ---- Tests: Events ------------------------------------------------------- */
 
 static void test_an_event_is_sent_at_once_with_sequence_number_1(void)
 {
@@ -303,14 +522,21 @@ static void test_the_event_in_flight_is_never_dropped(void)
 
 /* ---- Wired as the firmware wires it (main.c) ------------------------------ */
 
-/* The core's outputs share box_lines' context, so on_event finds the sender
- * here, as main.c finds its static one. */
+/* The core's outputs share box_lines' context, so on_event and
+ * on_box_status_changed find the sender here, as main.c finds its static
+ * one. */
 static BoxSender *wired_sender;
 
 static void wired_on_event(void *context, BoxEvent event, uint32_t now_ms)
 {
     (void)context;
     box_sender_add(wired_sender, event, now_ms);
+}
+
+static void wired_box_status_changed(void *context, BoxStatus status, uint32_t now_ms)
+{
+    box_lines_on_box_status_changed(context, status, now_ms);
+    box_sender_start(wired_sender, now_ms);
 }
 
 static BoxReadings readings(bool lid_open, bool parcel_present)
@@ -340,41 +566,60 @@ static uint32_t run_firmware(Firmware *fw, uint32_t now_ms, BoxReadings r,
     return now_ms;
 }
 
-static void test_wired_to_the_core_a_delivery_is_resent_until_acked(void)
+static void test_wired_to_the_core_boot_follows_the_first_sts_and_a_delivery_is_resent_until_acked(void)
 {
     static Firmware fw;
     BoxLinesOutput lines_output;
     BoxCoreOutputs core_outputs;
     uint32_t now_ms = 0;
-    start(&fw.rig);
+    power_up(&fw.rig);
     wired_sender = &fw.rig.sender;
     lines_output.context = &fw.rig.recorder;
     lines_output.write_line = record_line;
     box_lines_init(&fw.lines, lines_output);
     core_outputs = box_lines_core_outputs(&fw.lines);
     core_outputs.on_event = wired_on_event;
+    core_outputs.on_box_status_changed = wired_box_status_changed;
     box_core_init(&fw.core, core_outputs, now_ms, readings(false, false));
 
-    now_ms = run_firmware(&fw, now_ms, readings(false, false), BOX_SETTLE_TIME_MS + 100);
+    /* Nothing at all until the starting state is known, then STS and BOOT. */
+    now_ms = run_firmware(&fw, now_ms, readings(false, false), BOX_SETTLE_TIME_MS - 10);
+    CHECK_EQ_INT(0, fw.rig.recorder.count);
+    now_ms = run_firmware(&fw, now_ms, readings(false, false), 110);
+    CHECK_EQ_INT(2, fw.rig.recorder.count);
+    CHECK_LINE(&fw.rig, 0, "STS,EMPTY,LID_CLOSED\n");
+    CHECK_LINE(&fw.rig, 1, "BOOT\n");
+    box_sender_ack(&fw.rig.sender, BOX_BOOT_SEQ, now_ms);
+
     now_ms = run_firmware(&fw, now_ms, readings(true, false), 1000);
     now_ms = run_firmware(&fw, now_ms, readings(false, true), BOX_SETTLE_TIME_MS + 100);
-    CHECK_EQ_INT(5, fw.rig.recorder.count);
-    CHECK_LINE(&fw.rig, 3, "STS,OCCUPIED,LID_CLOSED\n");
-    CHECK_LINE(&fw.rig, 4, "EVT,1,DELIVERED\n");
-
-    now_ms = run_firmware(&fw, now_ms, readings(false, true), BOX_SENDER_RESEND_MS);
     CHECK_EQ_INT(6, fw.rig.recorder.count);
+    CHECK_LINE(&fw.rig, 4, "STS,OCCUPIED,LID_CLOSED\n");
     CHECK_LINE(&fw.rig, 5, "EVT,1,DELIVERED\n");
 
-    box_sender_ack(&fw.rig.sender, 1, now_ms);
-    /* From here on only the STS heartbeat. */
-    run_firmware(&fw, now_ms, readings(false, true), BOX_STS_HEARTBEAT_MS);
+    now_ms = run_firmware(&fw, now_ms, readings(false, true), BOX_SENDER_RESEND_MS);
     CHECK_EQ_INT(7, fw.rig.recorder.count);
-    CHECK_LINE(&fw.rig, 6, "STS,OCCUPIED,LID_CLOSED\n");
+    CHECK_LINE(&fw.rig, 6, "EVT,1,DELIVERED\n");
+
+    box_sender_ack(&fw.rig.sender, 1, now_ms);
+    /* From here on only the STS heartbeat; no second BOOT. */
+    run_firmware(&fw, now_ms, readings(false, true), BOX_STS_HEARTBEAT_MS);
+    CHECK_EQ_INT(8, fw.rig.recorder.count);
+    CHECK_LINE(&fw.rig, 7, "STS,OCCUPIED,LID_CLOSED\n");
 }
 
 int main(void)
 {
+    RUN_TEST(test_nothing_is_sent_before_the_session_starts);
+    RUN_TEST(test_starting_the_session_sends_boot);
+    RUN_TEST(test_starting_the_session_again_sends_nothing);
+    RUN_TEST(test_boot_is_resent_until_its_ack);
+    RUN_TEST(test_events_wait_for_the_session_then_leave_in_order);
+    RUN_TEST(test_a_late_ack_from_before_the_reboot_is_ignored_while_booting);
+    RUN_TEST(test_a_full_outbox_before_the_session_opens_drops_the_oldest_event);
+    RUN_TEST(test_ack_says_whether_it_was_accepted);
+    RUN_TEST(test_ack_0_once_the_session_is_open_is_ignored);
+    RUN_TEST(test_a_reboot_after_exactly_one_event_is_not_taken_for_a_duplicate);
     RUN_TEST(test_an_event_is_sent_at_once_with_sequence_number_1);
     RUN_TEST(test_an_unacked_event_is_resent_every_resend_interval);
     RUN_TEST(test_an_event_is_not_sent_again_after_its_ack);
@@ -387,6 +632,6 @@ int main(void)
     RUN_TEST(test_a_tick_stamped_just_before_the_send_does_not_resend);
     RUN_TEST(test_a_full_outbox_drops_the_oldest_event_waiting_behind_the_one_in_flight);
     RUN_TEST(test_the_event_in_flight_is_never_dropped);
-    RUN_TEST(test_wired_to_the_core_a_delivery_is_resent_until_acked);
+    RUN_TEST(test_wired_to_the_core_boot_follows_the_first_sts_and_a_delivery_is_resent_until_acked);
     return TEST_SUMMARY();
 }

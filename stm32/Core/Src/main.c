@@ -9,9 +9,10 @@
   * Every BOX_TICK_MS it reads the sensors and feeds them to the Box logic
   * core. The core's Box status changes go through box_lines, which writes
   * the STS lines (and the heartbeat) to the ESP32 and mirrors them to the
-  * debug log. Its Events go to the Event sender (box_sender), which numbers
-  * them and resends each EVT line until the ESP32 ACKs it. Its buzzer
-  * commands drive the buzzer pin through board_set_buzzer(). Bytes from the
+  * debug log. The first one also opens the Event sender's session (box_sender
+  * sends BOOT until the ESP32 ACKs it). Its Events go to the Event sender,
+  * which numbers them and resends each EVT line until the ESP32 ACKs it. Its
+  * buzzer commands drive the buzzer pin through board_set_buzzer(). Bytes from the
   * ESP32 arrive by interrupt and are fed to box_rx in the main loop, which
   * mirrors each line to the debug log and hands the ACKs to the sender
   * (all from the main loop, never an interrupt). All the decisions are in
@@ -108,6 +109,15 @@ static void mirror_received(void *context, const char *line)
   serial_mirror_received(line);
 }
 
+/* The core's on_box_status_changed output: the STS line, then (only the
+ * first time: the starting state is now known) the sender's BOOT line.
+ * Its context is the BoxLines that box_lines_core_outputs() set. */
+static void box_status_changed(void *context, BoxStatus status, uint32_t now_ms)
+{
+  box_lines_on_box_status_changed(context, status, now_ms);
+  box_sender_start(&sender, now_ms);
+}
+
 /* The core's on_event output: the Event sender numbers it and sends it
  * until it is ACKed. Its context is the BoxLines, so it is ignored here. */
 static void event_happened(void *context, BoxEvent event, uint32_t now_ms)
@@ -126,17 +136,28 @@ static void event_dropped(void *context, uint32_t seq, BoxEvent event)
   serial_debug("\r\n");
 }
 
-/* box_rx's on_ack output: the ESP32 accepted Event `seq`. The sender stops
- * resending it (and ignores an ACK for any other Event). Called from
+/* box_rx's on_ack output: `ACK,0` opens the session; `ACK,<seq>` stops the
+ * resends of Event `seq`. Only an ACK the sender accepts is logged (the
+ * line itself is already mirrored as "< ACK,..."). Called from
  * serial_poll_received(), before the main loop reads its clock for the
  * ticks, so this stamp is never later than theirs. */
 static void ack_received(void *context, uint32_t seq)
 {
   (void)context;
-  serial_debug("# ACK for Event ");
-  serial_debug_uint(seq);
-  serial_debug("\r\n");
-  box_sender_ack(&sender, seq, HAL_GetTick());
+  if (!box_sender_ack(&sender, seq, HAL_GetTick()))
+  {
+    return;
+  }
+  if (seq == BOX_BOOT_SEQ)
+  {
+    serial_debug("# Session open\r\n");
+  }
+  else
+  {
+    serial_debug("# ACK for Event ");
+    serial_debug_uint(seq);
+    serial_debug("\r\n");
+  }
 }
 /* USER CODE END 0 */
 
@@ -185,6 +206,7 @@ int main(void)
   box_sender_init(&sender, sender_outputs);
   last_tick_ms = HAL_GetTick();
   core_outputs = box_lines_core_outputs(&lines);
+  core_outputs.on_box_status_changed = box_status_changed;
   core_outputs.on_event = event_happened;
   core_outputs.on_buzzer = drive_buzzer;
   box_core_init(&core, core_outputs, last_tick_ms, board_read_sensors());
