@@ -19,7 +19,8 @@
  *       and again every BOX_STS_HEARTBEAT_MS after the last STS. No STS at
  *       all, not even a heartbeat, until the first Box status change.
  *   EVT,<seq>,<OUTCOME>  once per Event. seq starts at 1 at power-up and
- *       goes up by one per Event. Sent once: no ACK or resend yet (#27+).
+ *       goes up by one per Event. Sent once: the ESP32's ACKs are read
+ *       (box_rx.h) but nothing is resent yet (#28).
  * Each line passed to write_line ends in "\n" and is NUL-terminated.
  */
 #ifndef BOX_LINES_H
