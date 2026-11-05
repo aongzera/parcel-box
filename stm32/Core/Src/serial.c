@@ -21,8 +21,9 @@ static uint8_t rx_byte;        /* HAL receives each byte here */
 static void send(UART_HandleTypeDef *uart, const char *bytes, size_t length)
 {
     if (length > 0u) {
-        /* A timeout only loses this line; the next STS heartbeat repeats
-         * the Box status. */
+        /* A timeout only loses this line: the next STS heartbeat repeats
+         * the Box status, and the Event sender resends an EVT line until
+         * it is ACKed. */
         (void)HAL_UART_Transmit(uart, (const uint8_t *)bytes, (uint16_t)length,
                                 SEND_TIMEOUT_MS);
     }

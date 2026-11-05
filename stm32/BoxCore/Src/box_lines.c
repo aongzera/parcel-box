@@ -7,7 +7,6 @@ void box_lines_init(BoxLines *lines, BoxLinesOutput output)
 {
     memset(lines, 0, sizeof *lines);
     lines->output = output;
-    lines->next_seq = 1;
 }
 
 static void write_line(BoxLines *lines, const char *line)
@@ -61,16 +60,13 @@ void box_lines_on_box_status_changed(BoxLines *lines, BoxStatus status, uint32_t
     write_status(lines, now_ms);
 }
 
-void box_lines_on_event(BoxLines *lines, BoxEvent event, uint32_t now_ms)
+void box_lines_format_event(char line[BOX_LINE_MAX], uint32_t seq, BoxEvent event)
 {
-    char line[BOX_LINE_MAX];
-    (void)now_ms;
     strcpy(line, "EVT,");
-    append_uint(line, lines->next_seq++);
+    append_uint(line, seq);
     strcat(line, ",");
     strcat(line, event_name(event));
     strcat(line, "\n");
-    write_line(lines, line);
 }
 
 void box_lines_tick(BoxLines *lines, uint32_t now_ms)
@@ -82,11 +78,6 @@ void box_lines_tick(BoxLines *lines, uint32_t now_ms)
     }
 }
 
-static void core_event(void *context, BoxEvent event, uint32_t now_ms)
-{
-    box_lines_on_event(context, event, now_ms);
-}
-
 static void core_box_status_changed(void *context, BoxStatus status, uint32_t now_ms)
 {
     box_lines_on_box_status_changed(context, status, now_ms);
@@ -96,7 +87,6 @@ BoxCoreOutputs box_lines_core_outputs(BoxLines *lines)
 {
     BoxCoreOutputs outputs = {0};   /* callbacks we don't handle stay NULL */
     outputs.context = lines;
-    outputs.on_event = core_event;
     outputs.on_box_status_changed = core_box_status_changed;
     return outputs;
 }

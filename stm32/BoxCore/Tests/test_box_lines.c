@@ -1,6 +1,7 @@
 /*
  * PC tests for the UART line writer (box_lines). Each test feeds Box status
- * changes, Events and ticks, then checks only the lines it wrote.
+ * changes and ticks, then checks only the lines it wrote, or formats one
+ * EVT line.
  */
 #include <string.h>
 
@@ -87,49 +88,31 @@ static void test_sts_lines_name_every_box_status(void)
     CHECK_LINE(&rig, 2, "STS,OCCUPIED,LID_CLOSED\n");
 }
 
-static void test_an_event_writes_one_evt_line_with_sequence_number_1(void)
+/* Format one EVT line and compare it with `expected`; report `line_no`. */
+static void check_event_line(int line_no, uint32_t seq, BoxEvent event, const char *expected)
 {
-    Rig rig;
-    start(&rig);
-    box_lines_on_box_status_changed(&rig.lines, status(false, false), 2000);
-
-    box_lines_on_event(&rig.lines, BOX_EVENT_DELIVERED, 9000);
-
-    CHECK_EQ_INT(2, rig.recorder.count);
-    CHECK_LINE(&rig, 1, "EVT,1,DELIVERED\n");
+    char line[BOX_LINE_MAX];
+    box_lines_format_event(line, seq, event);
+    if (strcmp(line, expected) != 0) {
+        printf("    %s:%d: expected \"%s\", got \"%s\"\n",
+               __FILE__, line_no, expected, line);
+        test_current_failed = 1;
+    }
 }
 
-static void test_each_event_gets_the_next_sequence_number_and_its_outcome_name(void)
+static void test_an_evt_line_holds_the_given_sequence_number_and_outcome_name(void)
 {
-    Rig rig;
-    start(&rig);
-    box_lines_on_box_status_changed(&rig.lines, status(false, false), 2000);
-
-    box_lines_on_event(&rig.lines, BOX_EVENT_DELIVERED, 3000);
-    box_lines_on_event(&rig.lines, BOX_EVENT_OPENED_OCCUPIED, 4000);
-    box_lines_on_event(&rig.lines, BOX_EVENT_COLLECTED, 5000);
-    box_lines_on_event(&rig.lines, BOX_EVENT_OPENED_EMPTY, 6000);
-
-    CHECK_EQ_INT(5, rig.recorder.count);
-    CHECK_LINE(&rig, 1, "EVT,1,DELIVERED\n");
-    CHECK_LINE(&rig, 2, "EVT,2,OPENED_OCCUPIED\n");
-    CHECK_LINE(&rig, 3, "EVT,3,COLLECTED\n");
-    CHECK_LINE(&rig, 4, "EVT,4,OPENED_EMPTY\n");
+    check_event_line(__LINE__, 1, BOX_EVENT_DELIVERED, "EVT,1,DELIVERED\n");
+    check_event_line(__LINE__, 2, BOX_EVENT_OPENED_OCCUPIED, "EVT,2,OPENED_OCCUPIED\n");
+    check_event_line(__LINE__, 3, BOX_EVENT_COLLECTED, "EVT,3,COLLECTED\n");
+    check_event_line(__LINE__, 4, BOX_EVENT_OPENED_EMPTY, "EVT,4,OPENED_EMPTY\n");
 }
 
 static void test_multi_digit_sequence_numbers_are_written_in_full(void)
 {
-    Rig rig;
-    int i;
-    start(&rig);
-    box_lines_on_box_status_changed(&rig.lines, status(false, false), 2000);
-
-    for (i = 0; i < 12; i++) {
-        box_lines_on_event(&rig.lines, BOX_EVENT_OPENED_EMPTY, 3000u + (uint32_t)i);
-    }
-
-    CHECK_LINE(&rig, 10, "EVT,10,OPENED_EMPTY\n");
-    CHECK_LINE(&rig, 12, "EVT,12,OPENED_EMPTY\n");
+    check_event_line(__LINE__, 10, BOX_EVENT_OPENED_EMPTY, "EVT,10,OPENED_EMPTY\n");
+    check_event_line(__LINE__, 4294967295u, BOX_EVENT_OPENED_OCCUPIED,
+                     "EVT,4294967295,OPENED_OCCUPIED\n");
 }
 
 /* Tick every 10 ms from `from_ms` up to and including `to_ms`. */
@@ -186,19 +169,6 @@ static void test_a_box_status_change_restarts_the_heartbeat_wait(void)
     CHECK_LINE(&rig, 2, "STS,EMPTY,LID_OPEN\n");
 }
 
-static void test_an_event_does_not_delay_the_heartbeat(void)
-{
-    Rig rig;
-    start(&rig);
-    box_lines_on_box_status_changed(&rig.lines, status(true, false), 2000);
-    box_lines_on_event(&rig.lines, BOX_EVENT_DELIVERED, 4000);
-
-    tick_through(&rig, 4000, 2000 + BOX_STS_HEARTBEAT_MS);
-
-    CHECK_EQ_INT(3, rig.recorder.count);
-    CHECK_LINE(&rig, 2, "STS,OCCUPIED,LID_CLOSED\n");
-}
-
 static void test_the_heartbeat_keeps_time_across_the_millisecond_wraparound(void)
 {
     Rig rig;
@@ -236,7 +206,7 @@ static uint32_t run_firmware(Rig *rig, BoxCore *core, uint32_t now_ms,
     return now_ms;
 }
 
-static void test_wired_to_the_core_a_delivery_writes_its_box_status_and_event_lines(void)
+static void test_wired_to_the_core_a_delivery_writes_only_its_box_status_lines(void)
 {
     Rig rig;
     BoxCore core;
@@ -248,26 +218,24 @@ static void test_wired_to_the_core_a_delivery_writes_its_box_status_and_event_li
     now_ms = run_firmware(&rig, &core, now_ms, readings(true, false), 1000);
     now_ms = run_firmware(&rig, &core, now_ms, readings(false, true), BOX_SETTLE_TIME_MS + 100);
 
-    CHECK_EQ_INT(5, rig.recorder.count);
+    /* The Event goes to the Event sender (box_sender), not to box_lines. */
+    CHECK_EQ_INT(4, rig.recorder.count);
     CHECK_LINE(&rig, 0, "STS,EMPTY,LID_CLOSED\n");
     CHECK_LINE(&rig, 1, "STS,EMPTY,LID_OPEN\n");
     CHECK_LINE(&rig, 2, "STS,EMPTY,LID_CLOSED\n");
     CHECK_LINE(&rig, 3, "STS,OCCUPIED,LID_CLOSED\n");
-    CHECK_LINE(&rig, 4, "EVT,1,DELIVERED\n");
 }
 
 int main(void)
 {
     RUN_TEST(test_a_box_status_change_writes_one_sts_line);
     RUN_TEST(test_sts_lines_name_every_box_status);
-    RUN_TEST(test_an_event_writes_one_evt_line_with_sequence_number_1);
-    RUN_TEST(test_each_event_gets_the_next_sequence_number_and_its_outcome_name);
+    RUN_TEST(test_an_evt_line_holds_the_given_sequence_number_and_outcome_name);
     RUN_TEST(test_multi_digit_sequence_numbers_are_written_in_full);
     RUN_TEST(test_no_line_at_all_is_written_before_the_first_box_status);
     RUN_TEST(test_the_last_box_status_is_repeated_as_a_heartbeat);
     RUN_TEST(test_a_box_status_change_restarts_the_heartbeat_wait);
-    RUN_TEST(test_an_event_does_not_delay_the_heartbeat);
     RUN_TEST(test_the_heartbeat_keeps_time_across_the_millisecond_wraparound);
-    RUN_TEST(test_wired_to_the_core_a_delivery_writes_its_box_status_and_event_lines);
+    RUN_TEST(test_wired_to_the_core_a_delivery_writes_only_its_box_status_lines);
     return TEST_SUMMARY();
 }

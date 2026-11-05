@@ -9,8 +9,10 @@
  *
  * How to use it:
  *   1. box_lines_init() with your writer.
- *   2. Pass box_lines_core_outputs() to box_core_init(), so every Event and
- *      Box status change becomes a line.
+ *   2. Pass box_lines_core_outputs() to box_core_init(), so every Box
+ *      status change becomes a line. Events go to the Event sender
+ *      (box_sender.h), which numbers them and writes their EVT lines with
+ *      box_lines_format_event().
  *   3. Call box_lines_tick() as often as box_core_tick() (e.g. every 10 ms)
  *      for the heartbeat.
  *
@@ -18,10 +20,11 @@
  *   STS,<EMPTY|OCCUPIED>,<LID_OPEN|LID_CLOSED>  on every Box status change,
  *       and again every BOX_STS_HEARTBEAT_MS after the last STS. No STS at
  *       all, not even a heartbeat, until the first Box status change.
- *   EVT,<seq>,<OUTCOME>  once per Event. seq starts at 1 at power-up and
- *       goes up by one per Event. Sent once: the ESP32's ACKs are read
- *       (box_rx.h) but nothing is resent yet (#28).
  * Each line passed to write_line ends in "\n" and is NUL-terminated.
+ *
+ * box_lines_format_event() formats, but doesn't write, the line
+ *   EVT,<seq>,<OUTCOME>
+ * for the sequence number and outcome it is given.
  */
 #ifndef BOX_LINES_H
 #define BOX_LINES_H
@@ -50,20 +53,19 @@ typedef struct {
     bool status_known;      /* false until the first Box status change */
     BoxStatus status;       /* the last one, repeated by the heartbeat */
     uint32_t last_sts_at_ms;
-    uint32_t next_seq;
 } BoxLines;
 
 void box_lines_init(BoxLines *lines, BoxLinesOutput output);
 
-/* The BoxCoreOutputs that route the core's Events and Box status changes to
- * `lines`. Every other callback is NULL. */
+/* The BoxCoreOutputs that route the core's Box status changes to `lines`.
+ * Every other callback (on_event too) is NULL. */
 BoxCoreOutputs box_lines_core_outputs(BoxLines *lines);
 
 /* Write one STS line now and restart the heartbeat wait. */
 void box_lines_on_box_status_changed(BoxLines *lines, BoxStatus status, uint32_t now_ms);
 
-/* Write one EVT line with the next sequence number. */
-void box_lines_on_event(BoxLines *lines, BoxEvent event, uint32_t now_ms);
+/* Put "EVT,<seq>,<OUTCOME>\n" and its NUL in `line`. */
+void box_lines_format_event(char line[BOX_LINE_MAX], uint32_t seq, BoxEvent event);
 
 /* Write the heartbeat STS line when it is due. `now_ms` may wrap around. */
 void box_lines_tick(BoxLines *lines, uint32_t now_ms);

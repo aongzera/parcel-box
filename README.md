@@ -128,6 +128,7 @@ The STM32 prints every line it sends to the ESP32 over the USB cable too (see th
 2. Open it at **115200** baud, 8N1, in PuTTY or Tera Term. In CubeIDE you can use **Window → Show View → Terminal**, then open a Serial terminal.
 3. Press the black RESET button. You'll see a boot line starting with `#` (only on this port, never sent to the ESP32), then, about 2 s later (with the Lid closed; if it's open, the first STS comes once it closes and settles), the first `STS,...` line, then a heartbeat `STS` line every 5 s.
 4. Open and close the Lid (move the magnet). You'll see lines like `STS,EMPTY,LID_OPEN` and `EVT,1,OPENED_EMPTY`.
+5. With no ESP32 wired, nothing ACKs, so the STM32 resends `EVT,1,...` every 1 s, and later Events wait behind it in the outbox. After 8 more Lid cycles the outbox is full and you'll see `# Outbox full: dropped Event N` for each new one. To ACK by hand, connect a 3.3 V USB-serial adapter to USART1: D8 (PA9, TX) → adapter RX, D2 (PA10, RX) ← adapter TX, and a shared GND. Open the adapter's port at 115200 8N1 and type `ACK,1` and Enter. The resends of Event 1 stop and the next Event is sent. Or wire the ESP32, which ACKs by itself. The ST-LINK port above can't take ACKs: it only shows the mirror, and the STM32 never reads its input.
 
 ## 5. Working on the ESP32 (PlatformIO)
 

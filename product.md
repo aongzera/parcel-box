@@ -78,7 +78,7 @@ Other rules:
 
 ### Without WiFi
 
-The Box keeps detecting Lid cycles and beeping locally. Events are queued and delivered, in order and with their original times, once the connection comes back.
+The Box keeps detecting Lid cycles and beeping locally. Events are queued and delivered, in order and with their original times, once the connection comes back. "Original time" means when the Event arrived at the ESP32 from the STM32, since the ESP32 stamps each Event on arrival. Only the ESP32's offline queue keeps that time. The few seconds an Event may wait in the STM32's outbox before it reaches the ESP32 (e.g. while the ESP32 reboots or the UART wire is loose) aren't kept: the Event gets the time it finally arrived.
 
 ## 5. Architecture
 
@@ -122,6 +122,12 @@ The Box keeps detecting Lid cycles and beeping locally. Events are queued and de
 | STM32 → ESP32 | `EVT,<seq>,<OUTCOME>` | An Event. The outcome is one of the four names in section 4. |
 | STM32 → ESP32 | `STS,<EMPTY\|OCCUPIED>,<LID_OPEN\|LID_CLOSED>` | **Box status**. Sent on every change and every few seconds as a heartbeat, but not until the Box knows its starting state after boot (see below). |
 | ESP32 → STM32 | `ACK,<seq>` | The Event was accepted. The STM32 resends until it gets this. |
+
+**Sending Events (the STM32's Event sender, `box_sender.h`):**
+
+- Each Event gets its sequence number when it happens: 1 for the first after power-up, then one more for each Event.
+- Events wait in a small outbox (8 Events, counting the one being sent) and leave strictly in order, one at a time. The oldest is sent at once, then again every **1 s** until `ACK,<its seq>` arrives; then the next one is sent at once. An `ACK` for any other sequence number is ignored, so a late or repeated `ACK` is harmless.
+- **Outbox full** (the ESP32 hasn't ACKed for a while): a new Event drops the oldest one waiting behind the one being sent, and the debug log says `# Outbox full: dropped Event <seq>`. The one being sent is never dropped, since the ESP32 may already have it. Like the ESP32's offline queue, this keeps the newest Events, and the sequence numbers sent still only go up (with a gap). The outbox doesn't survive a reboot (section 10).
 
 The ESP32 ACKs a duplicate sequence number but ignores it, so each Event is delivered exactly once. A lower sequence number, or a heartbeat after a long silence, means the STM32 rebooted: start a new session and don't treat it as a duplicate.
 
