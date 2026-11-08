@@ -363,7 +363,7 @@ static void link_event(void *context, BridgeEvent event)
 static void test_the_esp32_keeps_acking_while_offline_and_uploads_the_events_later(void)
 {
     static const char lines[] =
-        "BOOT\nEVT,1,DELIVERED\nEVT,2,COLLECTED\nEVT,2,COLLECTED\n";
+        "BOOT*B6\nEVT,1,DELIVERED*4E\nEVT,2,COLLECTED*74\nEVT,2,COLLECTED*74\n";
     LinkRig both;
     BridgeLinkOutputs outputs;
     size_t i;
@@ -381,7 +381,7 @@ static void test_the_esp32_keeps_acking_while_offline_and_uploads_the_events_lat
         bridge_link_feed(&both.link, (uint8_t)lines[i]);
         run_loop(&both.rig, 1);
     }
-    CHECK(strcmp(both.replies, "ACK,0\nACK,1\nACK,2\nACK,2\n") == 0);
+    CHECK(strcmp(both.replies, "ACK,0*73\nACK,1*6E\nACK,2*49\nACK,2*49\n") == 0);
     CHECK_EQ_INT(0, both.rig.upload_count);
 
     both.rig.online = true;

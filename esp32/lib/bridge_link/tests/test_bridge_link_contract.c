@@ -2,7 +2,8 @@
  * PC tests of the UART protocol across both boards: the STM32's line writer
  * (box_lines) feeds the ESP32's link (bridge_link), and the ESP32's replies
  * go back through the STM32's line reader (box_rx). A change to a line on
- * one side only (a renamed outcome, a reordered field) fails here.
+ * one side only (a renamed outcome, a reordered field, the checksum rule)
+ * fails here.
  */
 #include <string.h>
 
@@ -22,6 +23,11 @@ typedef struct {
     uint32_t now_ms;     /* the STM32's clock, for the sender */
     bool lose_replies;   /* the ESP32's replies never reach the STM32 */
     bool lose_lines;     /* the STM32's lines never reach the ESP32 */
+    /* The next line the STM32 writes has bits `garble_mask` of its byte
+     * `garble_at` flipped on the wire, as line noise would. */
+    bool garble_next_line;
+    size_t garble_at;
+    uint8_t garble_mask;
     /* The ESP32's replies on their way to the STM32, delivered only once
      * bridge_link_feed() has returned, as on the hardware: the STM32 reads
      * them later, from its own main loop. */
@@ -59,11 +65,17 @@ static void deliver_replies(Rig *rig)
 static void stm32_writes(void *context, const char *line)
 {
     Rig *rig = context;
+    size_t i;
     if (!rig->lose_lines) {
-        while (*line != '\0') {
-            bridge_link_feed(&rig->link, (uint8_t)*line++);
+        for (i = 0; line[i] != '\0'; i++) {
+            uint8_t byte = (uint8_t)line[i];
+            if (rig->garble_next_line && i == rig->garble_at) {
+                byte ^= rig->garble_mask;
+            }
+            bridge_link_feed(&rig->link, byte);
         }
     }
+    rig->garble_next_line = false;
     deliver_replies(rig);
 }
 
@@ -394,7 +406,7 @@ static void test_an_stm32_reset_whose_boot_ack_is_lost_still_forwards_the_new_ev
 
 static void test_a_late_ack_from_before_an_stm32_reset_does_not_lose_the_new_event_1(void)
 {
-    static const char late_ack[] = "ACK,1\n";
+    static const char late_ack[] = "ACK,1*6E\n";
     Rig rig;
     size_t i;
 
@@ -454,7 +466,7 @@ static void test_an_event_line_cut_off_by_an_stm32_reset_is_dropped_and_the_new_
     }
 
     reset_stm32(&rig);
-    /* The first STS joins the cut line: "EVT,2,DELISTS,EMPTY,LID_CLOSED". */
+    /* The first STS joins the cut line: "EVT,2,DELISTS,EMPTY,LID_CLOSED*A5". */
     box_lines_on_box_status_changed(&rig.lines, starting, rig.now_ms);
     box_sender_start(&rig.sender, rig.now_ms);
     box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);
@@ -465,6 +477,66 @@ static void test_an_event_line_cut_off_by_an_stm32_reset_is_dropped_and_the_new_
     CHECK_EQ_INT(4, rig.ack_count);     /* no ACK for the merged line */
     CHECK_EQ_INT(0, rig.acks[2]);
     CHECK_EQ_INT(1, rig.acks[3]);
+}
+
+/* --- Checksums -------------------------------------------------------- */
+
+static void test_both_boards_compute_the_same_checksum_for_every_event_and_ack(void)
+{
+    /* Each board has its own checksum code (box_checksum, bridge_link).
+     * Every STM32 EVT line must check out on the ESP32, and the ESP32's
+     * ACK for it on the STM32. These give many checksum values, with
+     * every digit in every place up to four digits, and the longest. */
+    static const BoxEvent outcomes[] = {
+        BOX_EVENT_DELIVERED, BOX_EVENT_COLLECTED,
+        BOX_EVENT_OPENED_OCCUPIED, BOX_EVENT_OPENED_EMPTY,
+    };
+    static const uint32_t big[] = { 4294967295u, 4294967294u, 1234567890u, 987654321u };
+    uint32_t seq;
+    size_t o;
+    int mismatches = 0;
+
+    for (o = 0; o < sizeof outcomes / sizeof outcomes[0]; o++) {
+        for (seq = 1u; seq <= 2100u + sizeof big / sizeof big[0]; seq++) {
+            uint32_t sent = seq <= 2100u ? seq : big[seq - 2101u];
+            Rig rig;
+            char line[BOX_LINE_MAX];
+            start(&rig);
+            box_lines_format_event(line, sent, outcomes[o]);
+            stm32_writes(&rig, line);
+            if (rig.event_count != 1 || rig.ack_count != 1 || rig.acks[0] != sent) {
+                if (mismatches++ < 5) {
+                    printf("    \"%.*s\" not read back as Event and ACK %lu\n",
+                           (int)strlen(line) - 1, line, (unsigned long)sent);
+                }
+            }
+        }
+    }
+    CHECK_EQ_INT(0, mismatches);
+}
+
+static void test_an_event_garbled_on_the_wire_is_dropped_then_resent_and_forwarded(void)
+{
+    Rig rig;
+    start_with_sender(&rig);
+    box_sender_start(&rig.sender, rig.now_ms);
+
+    /* "EVT,1,..." arrives as "EVT,9,...": one bit (0x08) flipped. */
+    rig.garble_next_line = true;
+    rig.garble_at = 4;
+    rig.garble_mask = 0x08;
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, rig.now_ms);
+    CHECK_EQ_INT(0, rig.event_count);
+    CHECK_EQ_INT(1, rig.ack_count);   /* ACK,0 only: nothing for EVT,9 */
+
+    rig.now_ms += BOX_SENDER_RESEND_MS;
+    box_sender_tick(&rig.sender, rig.now_ms);   /* resent, intact */
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);
+
+    /* Event 9 was never accepted, so Event 2 isn't taken for a resend. */
+    CHECK_EQ_INT(2, rig.event_count);
+    CHECK_EQ_INT(1, rig.events[0].seq);
+    CHECK_EQ_INT(2, rig.events[1].seq);
 }
 
 int main(void)
@@ -481,5 +553,7 @@ int main(void)
     RUN_TEST(test_a_late_ack_from_before_an_stm32_reset_does_not_lose_the_new_event_1);
     RUN_TEST(test_after_an_stm32_reset_a_resent_event_is_still_forwarded_once);
     RUN_TEST(test_an_event_line_cut_off_by_an_stm32_reset_is_dropped_and_the_new_event_1_forwarded);
+    RUN_TEST(test_both_boards_compute_the_same_checksum_for_every_event_and_ack);
+    RUN_TEST(test_an_event_garbled_on_the_wire_is_dropped_then_resent_and_forwarded);
     return TEST_SUMMARY();
 }

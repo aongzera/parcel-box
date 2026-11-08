@@ -133,7 +133,7 @@ Then tick ticket #4 as done on the tracker, or close it on GitHub.
 
 This part is code, built with Claude Code. Here's what happens, so everyone can explain it at the demo:
 
-1. The STM32 decides an Event happened and sends `EVT,7,DELIVERED` to the ESP32 over the wire between them.
+1. The STM32 decides an Event happened and sends `EVT,7,DELIVERED*70` to the ESP32 over the wire between them. The `*70` is its checksum, so a line garbled on the wire is dropped and sent again. Lines you type in the ESP32's USB serial monitor, as in the table below, need none.
 2. The ESP32 saves it to Firebase, then checks the type. It's **not** OPENED_EMPTY, so it alerts.
 3. The ESP32 turns it into friendly text: "📦 Parcel delivered at 14:32".
 4. The ESP32 calls the same `sendMessage` address you used in step 4, over secure HTTPS.

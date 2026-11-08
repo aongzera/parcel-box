@@ -8,7 +8,8 @@
  * serial monitor, and supplies the outputs.
  *
  * How to use it:
- *   1. bridge_link_init() with your outputs.
+ *   1. bridge_link_init() with your outputs. For the USB link only (lines a
+ *      person types), also bridge_link_allow_lines_without_checksum().
  *   2. bridge_link_feed() every received byte, in order.
  *   3. bridge_link_lost() on any UART receive error (an overrun loses
  *      bytes; a framing, parity or break error garbles them). It need not
@@ -21,7 +22,30 @@
  * resent within 1 s and STS repeats, but a garbled EVT that read as a
  * higher number would make the real Events below it look like resends.
  *
- * Lines read (each ends in "\n"; a "\r\n" ending is fine too):
+ * Checksums: every line, both ways, is `<body>*HH`, where HH is the CRC-8
+ * of every byte of <body> in two hex digits (product.md section 5): the
+ * polynomial 0x1D (x^8 + x^4 + x^3 + x^2 + 1), initial value 0x00, most
+ * significant bit first, no final XOR. 115200 8N1 has no parity, so
+ * without it one flipped bit could turn EVT,12 into EVT,92 ('1' ^ 0x08 is
+ * '9') and make Events 13 to 92 look like resends. An XOR would miss the
+ * same bit flipped in two bytes. 0x1D is primitive, so the CRC only
+ * repeats after 255 bits, and the longest line (248 bits with its CRC) is
+ * shorter: one flipped bit is always caught, and so are two inside the
+ * body. The hex digits weaken this: one flipped bit in a check character
+ * can change the value by more than one bit, so a few pairs of one body
+ * bit plus one hex-digit bit get through. The only one that could raise
+ * an Event number needs a seq of 100,000,000 or more. Issue #32 will
+ * change the encoding so that every 2-bit error is caught. A line is kept only if it ends in a "*" and two hex digits that
+ * match the CRC-8 of every byte before that "*". One with no checksum, or
+ * a wrong or malformed one, is dropped like a garbled line: no reply, and
+ * on_dropped(). Upper- and lowercase hex are both read; replies are always
+ * sent in uppercase. After bridge_link_allow_lines_without_checksum(), a
+ * line with no "*" at all is read as a whole body too, so a person can
+ * type `BOOT` or `EVT,1,DELIVERED`; a line with a "*" must still check
+ * out. Replies always carry a checksum.
+ *
+ * Lines read, shown without their checksums (each ends in "\n"; a "\r\n"
+ * ending is fine too):
  *   BOOT                          reply `ACK,0` and start a new session.
  *   EVT,<seq>,<OUTCOME>           reply `ACK,<seq>`, then on_event() if
  *       the Event is new (see Sessions, below).
@@ -33,12 +57,12 @@
  * below, still reports it). That includes an EVT line with a bad sequence
  * number or outcome: it is not ACKed, so the STM32 sends it again 1 s
  * later, rather than an ACK for an Event that was never forwarded losing
- * it. A line is also dropped if it is longer than
- * BRIDGE_LINK_LINE_MAX characters, holds a byte that isn't printable
- * ASCII (a backspace typed in the serial monitor included), or ends between
- * bridge_link_lost() and bridge_link_quiet(), or was begun before that
- * quiet. Reading starts afresh after its "\n". An empty line is skipped
- * silently.
+ * it. A line is also dropped if it has a missing or wrong checksum (see
+ * Checksums, above), is longer than BRIDGE_LINK_LINE_MAX characters, holds
+ * a byte that isn't printable ASCII (a backspace typed in the serial
+ * monitor included), or ends between bridge_link_lost() and
+ * bridge_link_quiet(), or was begun before that quiet. Reading starts
+ * afresh after its "\n". An empty line is skipped silently.
  *
  * Sessions (product.md section 5, "Sessions and duplicates"): an EVT is
  * accepted, and passed to on_event(), only if its <seq> is higher than the
@@ -49,11 +73,11 @@
  * first EVT after either is accepted whatever its number.
  *
  * Other outputs, for the debug log:
- *   on_line(line)  every line kept (not dropped, not empty), without its
- *       "\r\n" or "\n", before it is handled. Unknown lines come out here
- *       too.
- *   on_dropped()   for each line dropped as too long, not printable, or
- *       around lost bytes.
+ *   on_line(line)  every line kept (not dropped, not empty), as received
+ *       with its checksum but without its "\r\n" or "\n", before it is
+ *       handled. Unknown lines come out here too.
+ *   on_dropped()   for each line dropped as too long, not printable,
+ *       around lost bytes, or for its checksum.
  *
  * on_event() is called the moment the EVT line arrives, so it is the place
  * to stamp the Event's arrival time.
@@ -70,11 +94,11 @@ extern "C" {
 #endif
 
 /* The longest line kept, not counting its "\r\n". The longest the STM32
- * sends is "EVT,4294967295,OPENED_OCCUPIED" (30). */
-#define BRIDGE_LINK_LINE_MAX 32
+ * sends is "EVT,4294967295,OPENED_OCCUPIED*HH" (33). */
+#define BRIDGE_LINK_LINE_MAX 36
 
-/* Room for the longest reply, "ACK,4294967295\n", and its NUL. */
-#define BRIDGE_LINK_REPLY_MAX 16
+/* Room for the longest reply, "ACK,4294967295*HH\n" (18), and its NUL. */
+#define BRIDGE_LINK_REPLY_MAX 20
 
 /* The outcome of a Lid cycle (product.md section 4). */
 typedef enum {
@@ -113,10 +137,17 @@ typedef struct {
     size_t length;
     bool spoiled;   /* drop the line in progress when its "\n" comes */
     bool discarding;   /* bytes were lost: drop every line until quiet */
+    bool allow_unchecked;   /* a line with no "*" needs no checksum */
     uint32_t last_seq;   /* last Event accepted this session; 0: none yet */
 } BridgeLink;
 
+/* Every line must carry a right checksum, as on the STM32's link. */
 void bridge_link_init(BridgeLink *link, BridgeLinkOutputs outputs);
+
+/* For the USB link only, never the STM32's: from now on a line with no "*"
+ * at all is read without a checksum, so a person can type lines by hand.
+ * A line with a "*" must still check out. Call it after bridge_link_init(). */
+void bridge_link_allow_lines_without_checksum(BridgeLink *link);
 
 /* One received byte. */
 void bridge_link_feed(BridgeLink *link, uint8_t byte);

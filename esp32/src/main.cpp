@@ -5,13 +5,19 @@
  * typed line never mixes with the STM32's bytes, and each one's replies go
  * back where its lines came from.
  *
+ * Every line on the STM32 link, both ways, ends in a checksum, `*HH`
+ * (product.md section 5). Lines you type need none: type `BOOT` or
+ * `EVT,1,DELIVERED` as they are. A typed line with a "*" must have the
+ * right checksum, as the STM32's lines must.
+ *
  * On the USB serial monitor:
- *   < line          a line received intact from the STM32
- *   > ACK,n         a reply sent to the STM32
- *   ACK,n           a reply to a line you typed
+ *   < line*HH       a line received intact from the STM32
+ *   > ACK,n*HH      a reply sent to the STM32
+ *   ACK,n*HH        a reply to a line you typed
  *   # dropped line  a line from the STM32, or typed, was too long, held a
- *                   non-printable byte (a backspace, say), or came around
- *                   a UART receive error, so it was ignored
+ *                   non-printable byte (a backspace, say), came around
+ *                   a UART receive error, or had a missing (STM32 only)
+ *                   or wrong checksum, so it was ignored
  *   # queued EVT,...   an Event, stamped with the time it arrived and put
  *                   in the offline queue (lib/event_queue). A resent Event
  *                   (its ACK was lost) is ACKed again but not queued; type
@@ -25,8 +31,10 @@
  *   # WiFi connected / # WiFi disconnected
  *
  * A UART receive error on the STM32 link drops every line from the STM32
- * until it has been quiet for STM32_QUIET_MS, so a lost or garbled digit
- * can't turn EVT,12 into EVT,1 or EVT,19. The STM32 resends what matters.
+ * until it has been quiet for STM32_QUIET_MS, and the checksum catches the
+ * garbling a UART can't see (8N1 has no parity), so a lost digit or a
+ * flipped bit can't turn EVT,12 into EVT,1 or EVT,92. The STM32 resends
+ * what matters.
  *
  * WiFi and NTP start in setup() without waiting for either, and reconnect
  * by themselves. The ACKs never wait for them: bridge_link ACKs each EVT
@@ -213,6 +221,8 @@ void setup()
     from_usb.on_status = print_status_if_changed;
     from_usb.on_dropped = report_dropped_line;
     bridge_link_init(&usb_link, from_usb);
+    /* Typed lines only: the STM32 link always needs the checksum. */
+    bridge_link_allow_lines_without_checksum(&usb_link);
 
     Serial.println("# ESP32 bridge ready");
 }

@@ -33,14 +33,20 @@ TESTBINS     += $(patsubst $(LINK)/tests/%.c,build/esp32/%$(EXE),$(LINK_SUITES))
 TESTBINS     += $(patsubst $(QUEUE)/tests/%.c,build/esp32/%$(EXE),$(QUEUE_SUITES))
 ESP32_INCS   := -I$(LINK)/src -I$(QUEUE)/src -I$(CORE)/Tests
 
-# The contract suite also links the STM32's line writer, line reader and
-# Event sender, so the two boards' ends of the UART protocol are tested
-# against each other.
+# The contract suite also links the STM32's line writer, line reader, Event
+# sender and line checksum, so the two boards' ends of the UART protocol are
+# tested against each other.
 CONTRACT      := build/esp32/test_bridge_link_contract$(EXE)
-CONTRACT_SRCS := $(CORE)/Src/box_lines.c $(CORE)/Src/box_rx.c $(CORE)/Src/box_sender.c
+CONTRACT_SRCS := $(CORE)/Src/box_lines.c $(CORE)/Src/box_rx.c $(CORE)/Src/box_sender.c \
+                 $(CORE)/Src/box_checksum.c
 $(CONTRACT): LINK_EXTRA_SRCS := $(CONTRACT_SRCS)
 $(CONTRACT): LINK_EXTRA_INCS := -I$(CORE)/Inc
 $(CONTRACT): $(CONTRACT_SRCS) $(wildcard $(CORE)/Inc/*.h)
+
+# The board link suite feeds millions of garbled Event lines (every body
+# bit with every check digit bit, for 4000 Events); optimised, that takes
+# about a second instead of three.
+build/esp32/test_bridge_link$(EXE): CFLAGS += -O2
 
 .PHONY: test clean
 
