@@ -70,7 +70,7 @@ static void test_a_box_status_change_writes_one_sts_line(void)
     box_lines_on_box_status_changed(&rig.lines, status(false, false), 2000);
 
     CHECK_EQ_INT(1, rig.recorder.count);
-    CHECK_LINE(&rig, 0, "STS,EMPTY,LID_CLOSED\n");
+    CHECK_LINE(&rig, 0, "STS,EMPTY,LID_CLOSED*A5\n");
 }
 
 static void test_sts_lines_name_every_box_status(void)
@@ -83,9 +83,9 @@ static void test_sts_lines_name_every_box_status(void)
     box_lines_on_box_status_changed(&rig.lines, status(true, false), 2200);
 
     CHECK_EQ_INT(3, rig.recorder.count);
-    CHECK_LINE(&rig, 0, "STS,EMPTY,LID_OPEN\n");
-    CHECK_LINE(&rig, 1, "STS,OCCUPIED,LID_OPEN\n");
-    CHECK_LINE(&rig, 2, "STS,OCCUPIED,LID_CLOSED\n");
+    CHECK_LINE(&rig, 0, "STS,EMPTY,LID_OPEN*01\n");
+    CHECK_LINE(&rig, 1, "STS,OCCUPIED,LID_OPEN*5B\n");
+    CHECK_LINE(&rig, 2, "STS,OCCUPIED,LID_CLOSED*39\n");
 }
 
 /* Format one EVT line and compare it with `expected`; report `line_no`. */
@@ -100,19 +100,31 @@ static void check_event_line(int line_no, uint32_t seq, BoxEvent event, const ch
     }
 }
 
+/* The checksums in these tests were worked out with an independent Python
+ * script: the CRC-8 (polynomial 0x1D, initial value 0x00) of every byte
+ * before the "*", in two uppercase hex digits. */
 static void test_an_evt_line_holds_the_given_sequence_number_and_outcome_name(void)
 {
-    check_event_line(__LINE__, 1, BOX_EVENT_DELIVERED, "EVT,1,DELIVERED\n");
-    check_event_line(__LINE__, 2, BOX_EVENT_OPENED_OCCUPIED, "EVT,2,OPENED_OCCUPIED\n");
-    check_event_line(__LINE__, 3, BOX_EVENT_COLLECTED, "EVT,3,COLLECTED\n");
-    check_event_line(__LINE__, 4, BOX_EVENT_OPENED_EMPTY, "EVT,4,OPENED_EMPTY\n");
+    check_event_line(__LINE__, 1, BOX_EVENT_DELIVERED, "EVT,1,DELIVERED*4E\n");
+    check_event_line(__LINE__, 2, BOX_EVENT_OPENED_OCCUPIED, "EVT,2,OPENED_OCCUPIED*BF\n");
+    check_event_line(__LINE__, 3, BOX_EVENT_COLLECTED, "EVT,3,COLLECTED*8A\n");
+    check_event_line(__LINE__, 4, BOX_EVENT_OPENED_EMPTY, "EVT,4,OPENED_EMPTY*71\n");
 }
 
 static void test_multi_digit_sequence_numbers_are_written_in_full(void)
 {
-    check_event_line(__LINE__, 10, BOX_EVENT_OPENED_EMPTY, "EVT,10,OPENED_EMPTY\n");
+    check_event_line(__LINE__, 10, BOX_EVENT_OPENED_EMPTY, "EVT,10,OPENED_EMPTY*77\n");
+    /* The longest line the STM32 writes: 33 characters and the "\n". */
     check_event_line(__LINE__, 4294967295u, BOX_EVENT_OPENED_OCCUPIED,
-                     "EVT,4294967295,OPENED_OCCUPIED\n");
+                     "EVT,4294967295,OPENED_OCCUPIED*49\n");
+}
+
+static void test_a_checksum_below_0x10_is_written_with_a_leading_zero(void)
+{
+    /* The CRC-8 of "EVT,4,OPENED_OCCUPIED" is 0x00, of
+     * "EVT,10,OPENED_OCCUPIED" 0x05. */
+    check_event_line(__LINE__, 4, BOX_EVENT_OPENED_OCCUPIED, "EVT,4,OPENED_OCCUPIED*00\n");
+    check_event_line(__LINE__, 10, BOX_EVENT_OPENED_OCCUPIED, "EVT,10,OPENED_OCCUPIED*05\n");
 }
 
 /* Tick every 10 ms from `from_ms` up to and including `to_ms`. */
@@ -149,8 +161,8 @@ static void test_the_last_box_status_is_repeated_as_a_heartbeat(void)
 
     tick_through(&rig, 2000 + BOX_STS_HEARTBEAT_MS, 2000 + 2 * BOX_STS_HEARTBEAT_MS);
     CHECK_EQ_INT(3, rig.recorder.count);
-    CHECK_LINE(&rig, 1, "STS,OCCUPIED,LID_CLOSED\n");
-    CHECK_LINE(&rig, 2, "STS,OCCUPIED,LID_CLOSED\n");
+    CHECK_LINE(&rig, 1, "STS,OCCUPIED,LID_CLOSED*39\n");
+    CHECK_LINE(&rig, 2, "STS,OCCUPIED,LID_CLOSED*39\n");
 }
 
 static void test_a_box_status_change_restarts_the_heartbeat_wait(void)
@@ -166,7 +178,7 @@ static void test_a_box_status_change_restarts_the_heartbeat_wait(void)
 
     tick_through(&rig, 3000 + BOX_STS_HEARTBEAT_MS, 3000 + BOX_STS_HEARTBEAT_MS);
     CHECK_EQ_INT(3, rig.recorder.count);
-    CHECK_LINE(&rig, 2, "STS,EMPTY,LID_OPEN\n");
+    CHECK_LINE(&rig, 2, "STS,EMPTY,LID_OPEN*01\n");
 }
 
 static void test_the_heartbeat_keeps_time_across_the_millisecond_wraparound(void)
@@ -220,10 +232,10 @@ static void test_wired_to_the_core_a_delivery_writes_only_its_box_status_lines(v
 
     /* The Event goes to the Event sender (box_sender), not to box_lines. */
     CHECK_EQ_INT(4, rig.recorder.count);
-    CHECK_LINE(&rig, 0, "STS,EMPTY,LID_CLOSED\n");
-    CHECK_LINE(&rig, 1, "STS,EMPTY,LID_OPEN\n");
-    CHECK_LINE(&rig, 2, "STS,EMPTY,LID_CLOSED\n");
-    CHECK_LINE(&rig, 3, "STS,OCCUPIED,LID_CLOSED\n");
+    CHECK_LINE(&rig, 0, "STS,EMPTY,LID_CLOSED*A5\n");
+    CHECK_LINE(&rig, 1, "STS,EMPTY,LID_OPEN*01\n");
+    CHECK_LINE(&rig, 2, "STS,EMPTY,LID_CLOSED*A5\n");
+    CHECK_LINE(&rig, 3, "STS,OCCUPIED,LID_CLOSED*39\n");
 }
 
 int main(void)
@@ -232,6 +244,7 @@ int main(void)
     RUN_TEST(test_sts_lines_name_every_box_status);
     RUN_TEST(test_an_evt_line_holds_the_given_sequence_number_and_outcome_name);
     RUN_TEST(test_multi_digit_sequence_numbers_are_written_in_full);
+    RUN_TEST(test_a_checksum_below_0x10_is_written_with_a_leading_zero);
     RUN_TEST(test_no_line_at_all_is_written_before_the_first_box_status);
     RUN_TEST(test_the_last_box_status_is_repeated_as_a_heartbeat);
     RUN_TEST(test_a_box_status_change_restarts_the_heartbeat_wait);

@@ -109,6 +109,15 @@ static void mirror_received(void *context, const char *line)
   serial_mirror_received(line);
 }
 
+/* box_rx's on_dropped output: a line from the ESP32 was dropped (too long,
+ * not printable, bytes lost in it, or a missing or wrong checksum). The
+ * same words as the ESP32's own debug log. */
+static void mirror_dropped(void *context)
+{
+  (void)context;
+  serial_debug("# dropped line\r\n");
+}
+
 /* The core's on_box_status_changed output: the STS line, then (only the
  * first time: the starting state is now known) the sender's BOOT line.
  * Its context is the BoxLines that box_lines_core_outputs() set. */
@@ -213,6 +222,7 @@ int main(void)
 
   reader_outputs.on_line = mirror_received;
   reader_outputs.on_ack = ack_received;
+  reader_outputs.on_dropped = mirror_dropped;
   box_rx_init(&reader, reader_outputs);
   serial_start_receiving();
   /* USER CODE END 2 */

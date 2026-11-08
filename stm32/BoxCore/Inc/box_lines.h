@@ -17,13 +17,14 @@
  *      for the heartbeat.
  *
  * Lines written:
- *   STS,<EMPTY|OCCUPIED>,<LID_OPEN|LID_CLOSED>  on every Box status change,
- *       and again every BOX_STS_HEARTBEAT_MS after the last STS. No STS at
- *       all, not even a heartbeat, until the first Box status change.
- * Each line passed to write_line ends in "\n" and is NUL-terminated.
+ *   STS,<EMPTY|OCCUPIED>,<LID_OPEN|LID_CLOSED>*HH  on every Box status
+ *       change, and again every BOX_STS_HEARTBEAT_MS after the last STS. No
+ *       STS at all, not even a heartbeat, until the first Box status change.
+ * Each line passed to write_line ends in its checksum (box_checksum.h) and
+ * "\n", and is NUL-terminated.
  *
  * box_lines_format_event() formats, but doesn't write, the line
- *   EVT,<seq>,<OUTCOME>
+ *   EVT,<seq>,<OUTCOME>*HH
  * for the sequence number and outcome it is given.
  */
 #ifndef BOX_LINES_H
@@ -34,14 +35,15 @@
 
 #include "box_core.h"
 
-/* Room for the longest line, "EVT,4294967295,OPENED_OCCUPIED\n", and its NUL. */
+/* Room for the longest line, "EVT,4294967295,OPENED_OCCUPIED*HH\n" (34),
+ * and its NUL. */
 #define BOX_LINE_MAX 40
 
 /* The line that opens a session after every boot (product.md section 5),
  * and the sequence number its ACK carries: `ACK,0`. Events are numbered
  * from 1, so no Event's ACK can be taken for it. The Event sender
- * (box_sender.h) sends it. */
-#define BOX_BOOT_LINE "BOOT\n"
+ * (box_sender.h) sends it. 0xB6 is the CRC-8 of "BOOT" (box_checksum.h). */
+#define BOX_BOOT_LINE "BOOT*B6\n"
 #define BOX_BOOT_SEQ  0u
 
 /* How long after the last STS line the Box status is sent again. Well under
@@ -71,7 +73,7 @@ BoxCoreOutputs box_lines_core_outputs(BoxLines *lines);
 /* Write one STS line now and restart the heartbeat wait. */
 void box_lines_on_box_status_changed(BoxLines *lines, BoxStatus status, uint32_t now_ms);
 
-/* Put "EVT,<seq>,<OUTCOME>\n" and its NUL in `line`. */
+/* Put "EVT,<seq>,<OUTCOME>*HH\n" and its NUL in `line`. */
 void box_lines_format_event(char line[BOX_LINE_MAX], uint32_t seq, BoxEvent event);
 
 /* Write the heartbeat STS line when it is due. `now_ms` may wrap around. */

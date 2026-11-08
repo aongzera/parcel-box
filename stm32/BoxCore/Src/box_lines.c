@@ -3,6 +3,16 @@
 
 #include <string.h>
 
+#include "box_checksum.h"
+
+/* The longest body, "EVT,4294967295,OPENED_OCCUPIED" (sizeof counts its
+ * NUL), sealed with "*HH\n", must fit in BOX_LINE_MAX. (C99 has no
+ * static_assert; a negative array size fails.) Written out by hand: keep
+ * it in step with event_name() below if an outcome name grows. */
+#define LONGEST_BODY "EVT,4294967295,OPENED_OCCUPIED"
+typedef char box_line_max_fits_the_longest_sealed_line
+    [(sizeof LONGEST_BODY + BOX_CHECKSUM_SUFFIX_LEN <= BOX_LINE_MAX) ? 1 : -1];
+
 void box_lines_init(BoxLines *lines, BoxLinesOutput output)
 {
     memset(lines, 0, sizeof *lines);
@@ -48,7 +58,8 @@ static void write_status(BoxLines *lines, uint32_t now_ms)
     char line[BOX_LINE_MAX];
     strcpy(line, "STS,");
     strcat(line, lines->status.occupied ? "OCCUPIED" : "EMPTY");
-    strcat(line, lines->status.lid_open ? ",LID_OPEN\n" : ",LID_CLOSED\n");
+    strcat(line, lines->status.lid_open ? ",LID_OPEN" : ",LID_CLOSED");
+    box_checksum_append(line);
     lines->last_sts_at_ms = now_ms;
     write_line(lines, line);
 }
@@ -66,7 +77,7 @@ void box_lines_format_event(char line[BOX_LINE_MAX], uint32_t seq, BoxEvent even
     append_uint(line, seq);
     strcat(line, ",");
     strcat(line, event_name(event));
-    strcat(line, "\n");
+    box_checksum_append(line);
 }
 
 void box_lines_tick(BoxLines *lines, uint32_t now_ms)
