@@ -183,7 +183,7 @@ The folders fill in as the tickets land.
 
 ## 7. Testing and CI
 
-- **Automated, the only automated suite:** the Box logic core and the UART line writer, compiled and run **on a PC** with `make test` from the repo root. Tests feed in sensor timelines and ticks, and check only what comes out (Events, Box status changes, buzzer commands, UART lines). They never check internal variables.
+- **Automated, the only automated suite:** the Box logic core and the UART line writer, plus the ESP32's end of the link (`esp32/lib/bridge_link`, pure C with no Arduino calls), compiled and run **on a PC** with `make test` from the repo root. Tests feed in sensor timelines, ticks and UART lines, and check only what comes out (Events, Box status changes, buzzer commands, UART lines and ACKs). They never check internal variables.
 - **Manual checklists** in `docs/`, written so non-coders can run them:
   - the ESP32 alone (typing UART lines);
   - the STM32 alone (reading its UART output);
