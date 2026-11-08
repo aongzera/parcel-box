@@ -117,15 +117,37 @@ static void sender_gets_ack(void *context, uint32_t seq)
     box_sender_ack(&rig->sender, seq, rig->now_ms);
 }
 
+/* The STM32 end, as it is after power-up or a reset: its line reader, line
+ * writer and Event sender start afresh. With `with_sender`, the ACKs it
+ * reads also go to its Event sender. */
+static void init_stm32_end(Rig *rig, bool with_sender)
+{
+    BoxRxOutputs rx_outputs;
+    BoxLinesOutput lines_output;
+    BoxSenderOutputs sender_outputs;
+
+    memset(&rx_outputs, 0, sizeof rx_outputs);
+    rx_outputs.context = rig;
+    rx_outputs.on_ack = with_sender ? sender_gets_ack : record_ack;
+    box_rx_init(&rig->rx, rx_outputs);
+
+    memset(&lines_output, 0, sizeof lines_output);
+    lines_output.context = rig;
+    lines_output.write_line = stm32_writes;
+    box_lines_init(&rig->lines, lines_output);
+
+    memset(&sender_outputs, 0, sizeof sender_outputs);
+    sender_outputs.context = rig;
+    sender_outputs.write_line = stm32_writes;
+    box_sender_init(&rig->sender, sender_outputs);
+}
+
 /* Both ends, wired together. With `with_sender`, the ACKs the STM32 reads
  * also go to its Event sender; the test opens the session itself with
  * box_sender_start(). */
 static void start_rig(Rig *rig, bool with_sender)
 {
     BridgeLinkOutputs link_outputs;
-    BoxRxOutputs rx_outputs;
-    BoxLinesOutput lines_output;
-    BoxSenderOutputs sender_outputs;
 
     memset(rig, 0, sizeof *rig);
     memset(&link_outputs, 0, sizeof link_outputs);
@@ -135,19 +157,7 @@ static void start_rig(Rig *rig, bool with_sender)
     link_outputs.on_status = record_status;
     bridge_link_init(&rig->link, link_outputs);
 
-    memset(&rx_outputs, 0, sizeof rx_outputs);
-    rx_outputs.context = rig;
-    rx_outputs.on_ack = with_sender ? sender_gets_ack : record_ack;
-    box_rx_init(&rig->rx, rx_outputs);
-
-    lines_output.context = rig;
-    lines_output.write_line = stm32_writes;
-    box_lines_init(&rig->lines, lines_output);
-
-    memset(&sender_outputs, 0, sizeof sender_outputs);
-    sender_outputs.context = rig;
-    sender_outputs.write_line = stm32_writes;
-    box_sender_init(&rig->sender, sender_outputs);
+    init_stm32_end(rig, with_sender);
 }
 
 static void start(Rig *rig)
@@ -294,6 +304,169 @@ static void test_events_waiting_in_the_outbox_are_forwarded_once_each_in_order(v
     CHECK_EQ_INT(3, rig.events[2].seq);
 }
 
+/* --- STM32 resets (#29) ------------------------------------------------ */
+
+/* The STM32 resets: its line reader, line writer and Event sender start
+ * afresh, and its clock restarts. The ESP32 keeps running with the same
+ * link. */
+static void reset_stm32(Rig *rig)
+{
+    init_stm32_end(rig, true);
+    rig->now_ms = 0;
+    rig->wire_length = 0;   /* replies in flight are lost with the reset */
+    rig->wire_read = 0;
+}
+
+/* A session that opens and sends `count` Events, each ACKed at once. */
+static void run_session(Rig *rig, int count)
+{
+    int i;
+    box_sender_start(&rig->sender, rig->now_ms);
+    for (i = 0; i < count; i++) {
+        rig->now_ms += 10u;
+        box_sender_add(&rig->sender, BOX_EVENT_DELIVERED, rig->now_ms);
+    }
+}
+
+static void test_after_an_stm32_reset_the_new_sessions_events_are_forwarded(void)
+{
+    /* One Event before the reset is the case the old "lower seq" rule got
+     * wrong: the new EVT,1 has the same number as the last one accepted. */
+    static const int before_reset[] = { 1, 3 };
+    size_t i;
+
+    for (i = 0; i < sizeof before_reset / sizeof before_reset[0]; i++) {
+        Rig rig;
+        start_with_sender(&rig);
+        run_session(&rig, before_reset[i]);
+        CHECK_EQ_INT(before_reset[i], rig.event_count);
+
+        reset_stm32(&rig);
+        box_sender_start(&rig.sender, rig.now_ms);
+        box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);
+        box_sender_add(&rig.sender, BOX_EVENT_OPENED_EMPTY, rig.now_ms);
+
+        CHECK_EQ_INT(before_reset[i] + 2, rig.event_count);
+        CHECK_EQ_INT(1, rig.events[before_reset[i]].seq);
+        CHECK_EQ_INT(BRIDGE_COLLECTED, rig.events[before_reset[i]].outcome);
+        CHECK_EQ_INT(2, rig.events[before_reset[i] + 1].seq);
+        CHECK_EQ_INT(BRIDGE_OPENED_EMPTY, rig.events[before_reset[i] + 1].outcome);
+    }
+}
+
+static void test_an_stm32_reset_while_an_events_ack_is_lost_does_not_skip_the_new_event_1(void)
+{
+    Rig rig;
+    start_with_sender(&rig);
+    box_sender_start(&rig.sender, rig.now_ms);
+    rig.lose_replies = true;   /* the ESP32 accepts EVT,1; its ACK is lost */
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, rig.now_ms);
+    rig.lose_replies = false;
+
+    reset_stm32(&rig);   /* before EVT,1 is resent */
+    box_sender_start(&rig.sender, rig.now_ms);
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);
+
+    CHECK_EQ_INT(2, rig.event_count);
+    CHECK_EQ_INT(1, rig.events[1].seq);
+    CHECK_EQ_INT(BRIDGE_COLLECTED, rig.events[1].outcome);
+}
+
+static void test_an_stm32_reset_whose_boot_ack_is_lost_still_forwards_the_new_event_1(void)
+{
+    Rig rig;
+    start_with_sender(&rig);
+    run_session(&rig, 2);
+
+    reset_stm32(&rig);
+    rig.lose_replies = true;   /* the ESP32 gets BOOT; its ACK,0 is lost */
+    box_sender_start(&rig.sender, rig.now_ms);
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);   /* waits */
+    rig.lose_replies = false;
+    CHECK_EQ_INT(2, rig.event_count);
+    rig.now_ms += BOX_SENDER_RESEND_MS;
+    box_sender_tick(&rig.sender, rig.now_ms);   /* BOOT again, then EVT,1 */
+
+    CHECK_EQ_INT(3, rig.event_count);
+    CHECK_EQ_INT(1, rig.events[2].seq);
+    CHECK_EQ_INT(BRIDGE_COLLECTED, rig.events[2].outcome);
+}
+
+static void test_a_late_ack_from_before_an_stm32_reset_does_not_lose_the_new_event_1(void)
+{
+    static const char late_ack[] = "ACK,1\n";
+    Rig rig;
+    size_t i;
+
+    start_with_sender(&rig);
+    box_sender_start(&rig.sender, rig.now_ms);
+    rig.lose_replies = true;   /* EVT,1 is accepted; its ACK is delayed */
+    box_sender_add(&rig.sender, BOX_EVENT_DELIVERED, rig.now_ms);
+
+    reset_stm32(&rig);
+    box_sender_start(&rig.sender, rig.now_ms);   /* ACK,0 is lost too */
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);   /* waits */
+    rig.lose_replies = false;
+    for (i = 0; late_ack[i] != '\0'; i++) {   /* the old session's ACK,1 */
+        box_rx_feed(&rig.rx, (uint8_t)late_ack[i]);
+    }
+    rig.now_ms += BOX_SENDER_RESEND_MS;
+    box_sender_tick(&rig.sender, rig.now_ms);   /* BOOT again, then EVT,1 */
+
+    CHECK_EQ_INT(2, rig.event_count);
+    CHECK_EQ_INT(1, rig.events[1].seq);
+    CHECK_EQ_INT(BRIDGE_COLLECTED, rig.events[1].outcome);
+}
+
+static void test_after_an_stm32_reset_a_resent_event_is_still_forwarded_once(void)
+{
+    Rig rig;
+    start_with_sender(&rig);
+    run_session(&rig, 1);
+
+    reset_stm32(&rig);
+    box_sender_start(&rig.sender, rig.now_ms);
+    rig.lose_replies = true;   /* the new EVT,1 is accepted; its ACK is lost */
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);
+    rig.lose_replies = false;
+    rig.now_ms += BOX_SENDER_RESEND_MS;
+    box_sender_tick(&rig.sender, rig.now_ms);   /* EVT,1 resent: ACKed only */
+    box_sender_add(&rig.sender, BOX_EVENT_OPENED_EMPTY, rig.now_ms);
+
+    CHECK_EQ_INT(3, rig.event_count);
+    CHECK_EQ_INT(1, rig.events[1].seq);
+    CHECK_EQ_INT(BRIDGE_COLLECTED, rig.events[1].outcome);
+    CHECK_EQ_INT(2, rig.events[2].seq);
+    CHECK_EQ_INT(BRIDGE_OPENED_EMPTY, rig.events[2].outcome);
+}
+
+static void test_an_event_line_cut_off_by_an_stm32_reset_is_dropped_and_the_new_event_1_forwarded(void)
+{
+    static const char cut[] = "EVT,2,DELI";   /* the reset came mid-line */
+    static const BoxStatus starting = { false, false };
+    Rig rig;
+    size_t i;
+
+    start_with_sender(&rig);
+    run_session(&rig, 1);   /* ACK,0 and ACK,1 */
+    for (i = 0; cut[i] != '\0'; i++) {
+        bridge_link_feed(&rig.link, (uint8_t)cut[i]);
+    }
+
+    reset_stm32(&rig);
+    /* The first STS joins the cut line: "EVT,2,DELISTS,EMPTY,LID_CLOSED". */
+    box_lines_on_box_status_changed(&rig.lines, starting, rig.now_ms);
+    box_sender_start(&rig.sender, rig.now_ms);
+    box_sender_add(&rig.sender, BOX_EVENT_COLLECTED, rig.now_ms);
+
+    CHECK_EQ_INT(2, rig.event_count);   /* the old EVT,1 and the new one */
+    CHECK_EQ_INT(1, rig.events[1].seq);
+    CHECK_EQ_INT(BRIDGE_COLLECTED, rig.events[1].outcome);
+    CHECK_EQ_INT(4, rig.ack_count);     /* no ACK for the merged line */
+    CHECK_EQ_INT(0, rig.acks[2]);
+    CHECK_EQ_INT(1, rig.acks[3]);
+}
+
 int main(void)
 {
     RUN_TEST(test_the_stm32s_boot_line_gets_the_ack_that_opens_its_session);
@@ -302,5 +475,11 @@ int main(void)
     RUN_TEST(test_an_event_the_stm32_resends_after_a_lost_ack_is_forwarded_once);
     RUN_TEST(test_an_event_lost_on_its_way_to_the_esp32_is_resent_and_forwarded_once);
     RUN_TEST(test_events_waiting_in_the_outbox_are_forwarded_once_each_in_order);
+    RUN_TEST(test_after_an_stm32_reset_the_new_sessions_events_are_forwarded);
+    RUN_TEST(test_an_stm32_reset_while_an_events_ack_is_lost_does_not_skip_the_new_event_1);
+    RUN_TEST(test_an_stm32_reset_whose_boot_ack_is_lost_still_forwards_the_new_event_1);
+    RUN_TEST(test_a_late_ack_from_before_an_stm32_reset_does_not_lose_the_new_event_1);
+    RUN_TEST(test_after_an_stm32_reset_a_resent_event_is_still_forwarded_once);
+    RUN_TEST(test_an_event_line_cut_off_by_an_stm32_reset_is_dropped_and_the_new_event_1_forwarded);
     return TEST_SUMMARY();
 }

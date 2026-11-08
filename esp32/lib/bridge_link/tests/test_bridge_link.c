@@ -422,6 +422,18 @@ static void test_quiet_with_no_bytes_lost_changes_nothing(void)
     CHECK_EQ_INT(1, rig.recorder.event_count);
 }
 
+static void test_an_empty_line_around_lost_bytes_is_skipped_silently(void)
+{
+    Rig rig;
+    start(&rig);
+    bridge_link_lost(&rig.link);
+    feed(&rig, "\n\r\n");
+    bridge_link_quiet(&rig.link);
+    CHECK_EQ_INT(0, rig.recorder.dropped_count);
+    CHECK_EQ_INT(0, rig.recorder.line_count);
+    CHECK_EQ_INT(0, rig.recorder.reply_count);
+}
+
 /* --- Debug log -------------------------------------------------------- */
 
 #define CHECK_LINE(rig, index, expected)                                    \
@@ -525,6 +537,7 @@ int main(void)
     RUN_TEST(test_after_lost_bytes_every_line_is_dropped_until_the_line_goes_quiet);
     RUN_TEST(test_a_line_begun_before_the_line_went_quiet_is_dropped);
     RUN_TEST(test_quiet_with_no_bytes_lost_changes_nothing);
+    RUN_TEST(test_an_empty_line_around_lost_bytes_is_skipped_silently);
     RUN_TEST(test_each_kept_line_is_passed_on_for_the_debug_log);
     RUN_TEST(test_a_dropped_line_is_reported_and_not_passed_on);
     RUN_TEST(test_an_empty_line_is_neither_kept_nor_dropped);

@@ -144,7 +144,7 @@ static void end_line(BridgeLink *link)
     if (link->length > 0u && link->line[link->length - 1u] == '\r') {
         link->length--;   /* a "\r\n" ending */
     }
-    empty = !spoiled && link->length == 0u;
+    empty = link->length == 0u;   /* skipped silently, even while discarding */
     keep = !spoiled && link->length <= BRIDGE_LINK_LINE_MAX &&
            all_printable(link->line, link->length);
     link->line[link->length] = '\0';
