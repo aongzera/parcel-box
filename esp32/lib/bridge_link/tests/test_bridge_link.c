@@ -153,6 +153,33 @@ static void test_each_outcome_name_is_forwarded_as_that_outcome(void)
     CHECK_REPLY(&rig, 2, "ACK,9\n");
 }
 
+/* How many replies had gone out when on_event was called. */
+static int replies_before_event = -1;
+
+static void note_replies_before_event(void *context, BridgeEvent event)
+{
+    (void)event;
+    replies_before_event = ((Recorder *)context)->reply_count;
+}
+
+static void test_an_event_is_acked_before_it_is_handed_on(void)
+{
+    /* So the ACK never waits for on_event (the offline queue, an upload),
+     * and the STM32's outbox keeps moving while the ESP32 is offline. */
+    Rig rig;
+    BridgeLinkOutputs outputs;
+    memset(&rig, 0, sizeof rig);
+    memset(&outputs, 0, sizeof outputs);
+    outputs.context = &rig.recorder;
+    outputs.write_line = record_reply;
+    outputs.on_event = note_replies_before_event;
+    bridge_link_init(&rig.link, outputs);
+    replies_before_event = -1;
+    feed(&rig, "EVT,1,DELIVERED\n");
+    CHECK_EQ_INT(1, replies_before_event);
+    CHECK_REPLY(&rig, 0, "ACK,1\n");
+}
+
 static void test_the_largest_seq_is_acked(void)
 {
     Rig rig;
@@ -517,6 +544,7 @@ int main(void)
     RUN_TEST(test_a_repeated_boot_is_answered_again);
     RUN_TEST(test_an_event_is_acked_with_its_seq_and_forwarded);
     RUN_TEST(test_each_outcome_name_is_forwarded_as_that_outcome);
+    RUN_TEST(test_an_event_is_acked_before_it_is_handed_on);
     RUN_TEST(test_the_largest_seq_is_acked);
     RUN_TEST(test_a_resent_event_is_acked_again_but_not_forwarded);
     RUN_TEST(test_an_event_older_than_the_last_accepted_is_acked_but_not_forwarded);
