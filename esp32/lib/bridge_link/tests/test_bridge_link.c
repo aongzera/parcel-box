@@ -163,6 +163,83 @@ static void test_the_largest_seq_is_acked(void)
     CHECK(rig.recorder.events[0].seq == 4294967295u);
 }
 
+/* --- Duplicates ------------------------------------------------------- */
+
+static void test_a_resent_event_is_acked_again_but_not_forwarded(void)
+{
+    Rig rig;
+    start(&rig);
+    /* The STM32 didn't get the first ACK, so it sends the Event again. */
+    feed(&rig, "BOOT\nEVT,1,DELIVERED\nEVT,1,DELIVERED\n");
+    CHECK_EQ_INT(3, rig.recorder.reply_count);
+    CHECK_REPLY(&rig, 1, "ACK,1\n");
+    CHECK_REPLY(&rig, 2, "ACK,1\n");
+    CHECK_EQ_INT(1, rig.recorder.event_count);
+}
+
+static void test_an_event_older_than_the_last_accepted_is_acked_but_not_forwarded(void)
+{
+    Rig rig;
+    start(&rig);
+    feed(&rig, "BOOT\nEVT,1,DELIVERED\nEVT,2,COLLECTED\nEVT,1,DELIVERED\n");
+    CHECK_EQ_INT(4, rig.recorder.reply_count);
+    CHECK_REPLY(&rig, 3, "ACK,1\n");
+    CHECK_EQ_INT(2, rig.recorder.event_count);
+    CHECK_EQ_INT(2, rig.recorder.events[1].seq);
+}
+
+static void test_a_gap_in_the_numbers_is_accepted(void)
+{
+    Rig rig;
+    start(&rig);
+    /* The STM32's outbox was full, so Events 2 to 4 were dropped there. */
+    feed(&rig, "BOOT\nEVT,1,DELIVERED\nEVT,5,COLLECTED\n");
+    CHECK_REPLY(&rig, 2, "ACK,5\n");
+    CHECK_EQ_INT(2, rig.recorder.event_count);
+    CHECK_EQ_INT(5, rig.recorder.events[1].seq);
+}
+
+static void test_after_start_the_first_event_is_accepted_whatever_its_number(void)
+{
+    Rig rig;
+    start(&rig);
+    /* The ESP32 restarted mid-session: no BOOT comes, as the STM32 didn't. */
+    feed(&rig, "EVT,5,DELIVERED\nEVT,3,COLLECTED\n");
+    CHECK_EQ_INT(2, rig.recorder.reply_count);
+    CHECK_REPLY(&rig, 0, "ACK,5\n");
+    CHECK_REPLY(&rig, 1, "ACK,3\n");
+    CHECK_EQ_INT(1, rig.recorder.event_count);
+    CHECK_EQ_INT(5, rig.recorder.events[0].seq);
+}
+
+static void test_boot_starts_a_new_session_so_event_1_is_accepted_again(void)
+{
+    Rig rig;
+    start(&rig);
+    /* The STM32 rebooted after Event 3; its numbers start again at 1. */
+    feed(&rig, "BOOT\nEVT,1,DELIVERED\nEVT,3,COLLECTED\n");
+    feed(&rig, "BOOT\nEVT,1,OPENED_EMPTY\n");
+    CHECK_REPLY(&rig, 3, "ACK,0\n");
+    CHECK_REPLY(&rig, 4, "ACK,1\n");
+    CHECK_EQ_INT(3, rig.recorder.event_count);
+    CHECK_EQ_INT(1, rig.recorder.events[2].seq);
+    CHECK_EQ_INT(BRIDGE_OPENED_EMPTY, rig.recorder.events[2].outcome);
+}
+
+static void test_a_repeated_boot_is_acked_each_time_and_the_event_after_is_forwarded_once(void)
+{
+    Rig rig;
+    start(&rig);
+    /* The first ACK,0 was lost, so the STM32 sent BOOT again. */
+    feed(&rig, "BOOT\nBOOT\nEVT,1,DELIVERED\n");
+    CHECK_EQ_INT(3, rig.recorder.reply_count);
+    CHECK_REPLY(&rig, 0, "ACK,0\n");
+    CHECK_REPLY(&rig, 1, "ACK,0\n");
+    CHECK_REPLY(&rig, 2, "ACK,1\n");
+    CHECK_EQ_INT(1, rig.recorder.event_count);
+    CHECK_EQ_INT(1, rig.recorder.events[0].seq);
+}
+
 /* Each line must get no reply and forward nothing, and the link must still
  * work after it. */
 static void check_ignored(const char *line)
@@ -283,6 +360,68 @@ static void test_a_line_with_a_non_printable_byte_is_dropped(void)
     check_ignored("BOOT\t\n");
 }
 
+static void test_a_line_that_lost_bytes_is_dropped(void)
+{
+    Rig rig;
+    start(&rig);
+    /* "EVT,12,DELIVERED\n" with the "2" lost would otherwise read as Event 1. */
+    feed(&rig, "BOOT\nEVT,1");
+    bridge_link_lost(&rig.link);
+    feed(&rig, ",DELIVERED\n");
+    CHECK_EQ_INT(1, rig.recorder.dropped_count);
+    CHECK_EQ_INT(1, rig.recorder.reply_count);
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+}
+
+static void test_after_lost_bytes_every_line_is_dropped_until_the_line_goes_quiet(void)
+{
+    Rig rig;
+    start(&rig);
+    /* The loss is reported late: the bytes before the gap (a whole STS
+     * line) were still buffered, and the gap fell inside "EVT,1x". */
+    feed(&rig, "BOOT\n");
+    bridge_link_lost(&rig.link);
+    feed(&rig, "STS,EMPTY,LID_CLOSED\nEVT,1");
+    feed(&rig, ",DELIVERED\n");
+    CHECK_EQ_INT(2, rig.recorder.dropped_count);
+    CHECK_EQ_INT(0, rig.recorder.status_count);
+    CHECK_EQ_INT(1, rig.recorder.reply_count);   /* BOOT's ACK,0 only */
+    CHECK_EQ_INT(0, rig.recorder.event_count);
+
+    bridge_link_quiet(&rig.link);
+    feed(&rig, "EVT,2,DELIVERED\n");
+    CHECK_EQ_INT(2, rig.recorder.reply_count);
+    CHECK_REPLY(&rig, 1, "ACK,2\n");
+    CHECK_EQ_INT(1, rig.recorder.event_count);
+    CHECK_EQ_INT(2, rig.recorder.events[0].seq);
+}
+
+static void test_a_line_begun_before_the_line_went_quiet_is_dropped(void)
+{
+    Rig rig;
+    start(&rig);
+    feed(&rig, "BOOT\n");
+    bridge_link_lost(&rig.link);
+    feed(&rig, "EVT,1");   /* its "\n" was lost, or comes after the quiet */
+    bridge_link_quiet(&rig.link);
+    feed(&rig, ",DELIVERED\nEVT,3,COLLECTED\n");
+    CHECK_EQ_INT(1, rig.recorder.dropped_count);
+    CHECK_EQ_INT(1, rig.recorder.event_count);
+    CHECK_EQ_INT(3, rig.recorder.events[0].seq);
+}
+
+static void test_quiet_with_no_bytes_lost_changes_nothing(void)
+{
+    Rig rig;
+    start(&rig);
+    /* main.cpp may report every quiet spell, so mid-line is harmless. */
+    feed(&rig, "BOOT\nEVT,1");
+    bridge_link_quiet(&rig.link);
+    feed(&rig, ",DELIVERED\n");
+    CHECK_EQ_INT(0, rig.recorder.dropped_count);
+    CHECK_EQ_INT(1, rig.recorder.event_count);
+}
+
 /* --- Debug log -------------------------------------------------------- */
 
 #define CHECK_LINE(rig, index, expected)                                    \
@@ -367,6 +506,12 @@ int main(void)
     RUN_TEST(test_an_event_is_acked_with_its_seq_and_forwarded);
     RUN_TEST(test_each_outcome_name_is_forwarded_as_that_outcome);
     RUN_TEST(test_the_largest_seq_is_acked);
+    RUN_TEST(test_a_resent_event_is_acked_again_but_not_forwarded);
+    RUN_TEST(test_an_event_older_than_the_last_accepted_is_acked_but_not_forwarded);
+    RUN_TEST(test_a_gap_in_the_numbers_is_accepted);
+    RUN_TEST(test_after_start_the_first_event_is_accepted_whatever_its_number);
+    RUN_TEST(test_boot_starts_a_new_session_so_event_1_is_accepted_again);
+    RUN_TEST(test_a_repeated_boot_is_acked_each_time_and_the_event_after_is_forwarded_once);
     RUN_TEST(test_an_event_with_a_bad_seq_is_not_acked_or_forwarded);
     RUN_TEST(test_an_event_with_a_bad_outcome_is_not_acked_or_forwarded);
     RUN_TEST(test_a_box_status_is_forwarded_without_a_reply);
@@ -376,6 +521,10 @@ int main(void)
     RUN_TEST(test_an_overlong_line_is_dropped_whole);
     RUN_TEST(test_a_line_of_the_longest_length_is_read);
     RUN_TEST(test_a_line_with_a_non_printable_byte_is_dropped);
+    RUN_TEST(test_a_line_that_lost_bytes_is_dropped);
+    RUN_TEST(test_after_lost_bytes_every_line_is_dropped_until_the_line_goes_quiet);
+    RUN_TEST(test_a_line_begun_before_the_line_went_quiet_is_dropped);
+    RUN_TEST(test_quiet_with_no_bytes_lost_changes_nothing);
     RUN_TEST(test_each_kept_line_is_passed_on_for_the_debug_log);
     RUN_TEST(test_a_dropped_line_is_reported_and_not_passed_on);
     RUN_TEST(test_an_empty_line_is_neither_kept_nor_dropped);

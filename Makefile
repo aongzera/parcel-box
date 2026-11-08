@@ -27,10 +27,11 @@ LINK_HDRS   := $(wildcard $(LINK)/src/*.h) $(CORE)/Tests/test_harness.h
 LINK_SUITES := $(wildcard $(LINK)/tests/test_*.c)
 TESTBINS    += $(patsubst $(LINK)/tests/%.c,build/esp32/%$(EXE),$(LINK_SUITES))
 
-# The contract suite also links the STM32's line writer and line reader, so
-# the two boards' ends of the UART protocol are tested against each other.
+# The contract suite also links the STM32's line writer, line reader and
+# Event sender, so the two boards' ends of the UART protocol are tested
+# against each other.
 CONTRACT      := build/esp32/test_bridge_link_contract$(EXE)
-CONTRACT_SRCS := $(CORE)/Src/box_lines.c $(CORE)/Src/box_rx.c
+CONTRACT_SRCS := $(CORE)/Src/box_lines.c $(CORE)/Src/box_rx.c $(CORE)/Src/box_sender.c
 $(CONTRACT): LINK_EXTRA_SRCS := $(CONTRACT_SRCS)
 $(CONTRACT): LINK_EXTRA_INCS := -I$(CORE)/Inc
 $(CONTRACT): $(CONTRACT_SRCS) $(wildcard $(CORE)/Inc/*.h)

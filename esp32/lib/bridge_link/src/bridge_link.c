@@ -60,7 +60,8 @@ static bool parse_outcome(const char *text, BridgeOutcome *outcome)
     return false;
 }
 
-/* "EVT,<seq>,<OUTCOME>": ACK it, then forward it. */
+/* "EVT,<seq>,<OUTCOME>": ACK it, then forward it if it is new in this
+ * session. */
 static void handle_event(BridgeLink *link, const char *fields)
 {
     BridgeEvent event;
@@ -73,6 +74,10 @@ static void handle_event(BridgeLink *link, const char *fields)
     }
     snprintf(ack, sizeof ack, "ACK,%lu\n", (unsigned long)event.seq);
     reply(link, ack);
+    if (event.seq <= link->last_seq) {
+        return;   /* a resend of one already accepted */
+    }
+    link->last_seq = event.seq;
     if (link->outputs.on_event != NULL) {
         link->outputs.on_event(link->outputs.context, event);
     }
@@ -107,6 +112,7 @@ static void handle_status(BridgeLink *link, const char *fields)
 static void handle_line(BridgeLink *link, const char *line)
 {
     if (strcmp(line, "BOOT") == 0) {
+        link->last_seq = 0;   /* a new session: nothing accepted in it yet */
         reply(link, "ACK,0\n");
     } else if (strncmp(line, "EVT,", 4) == 0) {
         handle_event(link, line + 4);
@@ -133,12 +139,13 @@ static void end_line(BridgeLink *link)
 {
     bool keep;
     bool empty;
+    bool spoiled = link->spoiled || link->discarding;
 
     if (link->length > 0u && link->line[link->length - 1u] == '\r') {
         link->length--;   /* a "\r\n" ending */
     }
-    empty = !link->spoiled && link->length == 0u;
-    keep = !link->spoiled && link->length <= BRIDGE_LINK_LINE_MAX &&
+    empty = !spoiled && link->length == 0u;
+    keep = !spoiled && link->length <= BRIDGE_LINK_LINE_MAX &&
            all_printable(link->line, link->length);
     link->line[link->length] = '\0';
     link->length = 0;
@@ -166,6 +173,21 @@ void bridge_link_feed(BridgeLink *link, uint8_t byte)
         link->line[link->length++] = (char)byte;
     } else {
         link->spoiled = true;   /* too long, even allowing for a "\r" */
+    }
+}
+
+void bridge_link_lost(BridgeLink *link)
+{
+    link->discarding = true;
+}
+
+void bridge_link_quiet(BridgeLink *link)
+{
+    if (link->discarding) {
+        link->discarding = false;
+        if (link->length > 0u) {
+            link->spoiled = true;   /* begun while discarding */
+        }
     }
 }
 
